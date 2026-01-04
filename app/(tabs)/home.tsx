@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { View, Text, Pressable, StyleSheet, Alert } from "react-native";
 import { auth } from "../../src/services/firebase";
 import { updateHighscoreIfBetter } from "../../src/services/db";
+import { unlockAchievementsIfNeeded } from "../../src/services/achievements";
 
 export default function Home() {
   const [steps, setSteps] = useState(0);
@@ -18,15 +19,26 @@ export default function Home() {
     }
 
     try {
+      // 1) Highscore updaten
       const res = await updateHighscoreIfBetter(uid, newSteps);
       if (res.updated) {
         setStatus(`✅ Neuer Highscore: ${res.bestDailySteps}`);
       } else {
         setStatus(`ℹ️ Kein neuer Highscore (Best: ${res.bestDailySteps})`);
       }
+
+      // 2) Achievements prüfen & freischalten
+      const ach = await unlockAchievementsIfNeeded(uid, newSteps);
+      if (ach.unlocked.length > 0) {
+        Alert.alert(
+          "Erfolg freigeschaltet 🎉",
+          `Neu: ${ach.unlocked.join(", ")}\nItems: ${ach.unlockedItems.join(", ")}`
+        );
+      }
     } catch (e: any) {
       setStatus("❌ Fehler beim Speichern");
       Alert.alert("Firestore Fehler", e?.message ?? "Unbekannter Fehler");
+      console.log("Home addSteps error:", e);
     }
   }
 
@@ -37,9 +49,7 @@ export default function Home() {
       <View style={styles.card}>
         <Text style={styles.label}>Heutige Schritte (Debug)</Text>
         <Text style={styles.big}>{steps}</Text>
-        <Text style={styles.small}>
-          User: {auth.currentUser?.email ?? "—"}
-        </Text>
+        <Text style={styles.small}>User: {auth.currentUser?.email ?? "—"}</Text>
       </View>
 
       <Pressable style={styles.button} onPress={() => addSteps(500)}>
