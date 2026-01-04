@@ -15,6 +15,11 @@ import { db } from "./firebase";
 export type UserDoc = {
   dailyGoal: number;
   createdAt: any; // serverTimestamp()
+
+  //  für Erfolge + Avatar-Freischaltungen
+  unlockedAchievementIds: string[];
+  unlockedItemIds: string[];
+
   avatar: {
     skinTone: string;
     equippedItemIds: string[];
@@ -40,6 +45,11 @@ export async function ensureUserDoc(uid: string) {
   const data: UserDoc = {
     dailyGoal: DEFAULT_DAILY_GOAL,
     createdAt: serverTimestamp(),
+
+    // leere Arrays initialisieren
+    unlockedAchievementIds: [],
+    unlockedItemIds: [],
+
     avatar: {
       skinTone: "default",
       equippedItemIds: [],
@@ -95,6 +105,19 @@ export async function updateHighscoreIfBetter(uid: string, steps: number) {
   }
 
   return { updated: false, bestDailySteps: best };
+}
+
+//eigenen Bestwert holen
+export async function getMyBest(uid: string) {
+  const ref = doc(db, "scores", uid);
+  const snap = await getDoc(ref);
+  return (snap.data() as { bestDailySteps?: number })?.bestDailySteps ?? 0;
+}
+
+export async function getUser(uid: string) {
+  const ref = doc(db, "users", uid);
+  const snap = await getDoc(ref);
+  return snap.exists() ? snap.data() : null;
 }
 
 /**
