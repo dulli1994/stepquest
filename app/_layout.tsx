@@ -41,10 +41,12 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
-      <Stack screenOptions={{ headerShown: false }}>
+      {/* ✅ Wichtig: key erzwingt Remount bei Login/Logout */}
+      <Stack key={isSignedIn ? "app" : "auth"} screenOptions={{ headerShown: false }}>
         {isSignedIn ? <Stack.Screen name="(tabs)" /> : <Stack.Screen name="(auth)" />}
         <Stack.Screen name="modal" options={{ presentation: "modal", title: "Modal" }} />
       </Stack>
+
       <StatusBar style="auto" />
     </ThemeProvider>
   );
