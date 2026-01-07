@@ -1,9 +1,20 @@
 import { FontAwesome5, Ionicons } from "@expo/vector-icons";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
 import { Pedometer } from "expo-sensors";
 import React, { useEffect, useRef, useState } from "react";
-import { Alert, Dimensions, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import {
+  Alert,
+  AppState,
+  AppStateStatus,
+  Dimensions,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { router } from "expo-router";
 
 import { unlockAchievementsIfNeeded } from "../../src/services/achievements";
 import { updateHighscoreIfBetter } from "../../src/services/db";
@@ -21,9 +32,20 @@ function getDayKey(d: Date) {
   return `${y}-${m}-${day}`;
 }
 
+function getStartOfDay(d: Date) {
+  const start = new Date(d);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
 export default function Home() {
   const [steps, setSteps] = useState(0);
   const [showBatteryHint, setShowBatteryHint] = useState(true);
+
+  /**
+   * Ref für den aktuellen Schrittstand, damit wir in Callbacks immer den neuesten Wert haben.
+   */
+  const stepsRef = useRef(0);
 
   const goal = 10000;
   const progress = Math.min(steps / goal, 1);
@@ -38,7 +60,7 @@ export default function Home() {
    * Tages-Tracking
    */
   const dayKeyRef = useRef<string>(getDayKey(new Date()));
-  const startOfDayRef = useRef<Date | null>(null);
+  const startOfDayRef = useRef<Date>(getStartOfDay(new Date()));
 
   /**
    * Delta-Quelle für watchStepCount
@@ -51,6 +73,13 @@ export default function Home() {
   const lastAnyUpdateMsRef = useRef<number>(Date.now());
 
   /**
+   * Merkt sich den letzten Systemwert (getStepCountAsync).
+   * Manche Geräte liefern hier lange den gleichen Wert -> den ignorieren wir dann.
+   */
+  const lastSystemStepsRef = useRef<number | null>(null);
+  const lastSystemChangedMsRef = useRef<number>(0);
+
+  /**
    * Backend-Sync Drosselung
    */
   const lastSyncedStepsRef = useRef(0);
@@ -59,25 +88,40 @@ export default function Home() {
   const SYNC_MIN_STEP_DELTA = 300;
 
   /**
-   * Polling-Interval:
-   * - versucht (wenn möglich) die Tages-Schritte vom System zu holen
-   * - ansonsten bleibt Delta-Ansatz aktiv
-   * - außerdem watchdog/resubscribe
+   * Polling/Watchdog:
+   * - Polling hilft, wenn watchStepCount sporadisch aussetzt
+   * - Häufiger als 5s reagiert besser, ohne die App zu belasten
    */
-  const POLL_INTERVAL_MS = 5_000;
+  const POLL_INTERVAL_MS = 2_000;
+
+  /**
+   * Wenn lange keine Sensor-Events kommen, setzen wir die Subscription neu auf.
+   */
   const RESUBSCRIBE_AFTER_MS = 30_000;
 
-  function initStartOfDay() {
-    const now = new Date();
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
-    startOfDayRef.current = start;
+  /**
+   * Setzt Schritte, schreibt sie in AsyncStorage und triggert (gedrosselt) Backend Sync.
+   */
+  function setStepsAndPersist(nextSteps: number) {
+    setSteps(nextSteps);
+    stepsRef.current = nextSteps;
+
+    Promise.all([
+      AsyncStorage.setItem(STORAGE_DAY_KEY, dayKeyRef.current),
+      AsyncStorage.setItem(STORAGE_STEPS_KEY, String(nextSteps)),
+    ]).catch(() => {});
+
+    syncBackendIfNeeded(nextSteps).catch(() => {});
   }
 
+  /**
+   * Lädt die heutigen Schritte aus AsyncStorage.
+   * Wenn neuer Tag -> reset auf 0.
+   */
   async function loadTodayFromStorage() {
     const todayKey = getDayKey(new Date());
     dayKeyRef.current = todayKey;
-    initStartOfDay();
+    startOfDayRef.current = getStartOfDay(new Date());
 
     const [storedDayKey, storedSteps] = await Promise.all([
       AsyncStorage.getItem(STORAGE_DAY_KEY),
@@ -88,41 +132,41 @@ export default function Home() {
       const parsed = Number(storedSteps);
       if (Number.isFinite(parsed)) {
         setSteps(parsed);
+        stepsRef.current = parsed;
         return;
       }
     }
 
     setSteps(0);
+    stepsRef.current = 0;
+
     await Promise.all([
       AsyncStorage.setItem(STORAGE_DAY_KEY, todayKey),
       AsyncStorage.setItem(STORAGE_STEPS_KEY, "0"),
     ]);
   }
 
-  async function saveTodayToStorage(nextSteps: number) {
-    await Promise.all([
-      AsyncStorage.setItem(STORAGE_DAY_KEY, dayKeyRef.current),
-      AsyncStorage.setItem(STORAGE_STEPS_KEY, String(nextSteps)),
-    ]);
-  }
-
+  /**
+   * Prüft, ob ein neuer Tag angefangen hat (00:00).
+   * Dann resetten wir lokal und setzen Baselines zurück.
+   */
   async function checkMidnightResetIfNeeded() {
     const nowKey = getDayKey(new Date());
     if (nowKey === dayKeyRef.current) return;
 
     dayKeyRef.current = nowKey;
-    initStartOfDay();
+    startOfDayRef.current = getStartOfDay(new Date());
 
-    // Baseline zurücksetzen, weil Sensor-Zähler nicht zu unserem Tag passt
     lastSensorStepsRef.current = null;
+    lastSystemStepsRef.current = null;
+    lastSystemChangedMsRef.current = 0;
 
-    setSteps(0);
-    await Promise.all([
-      AsyncStorage.setItem(STORAGE_DAY_KEY, nowKey),
-      AsyncStorage.setItem(STORAGE_STEPS_KEY, "0"),
-    ]);
+    setStepsAndPersist(0);
   }
 
+  /**
+   * Sync in die Cloud, aber gedrosselt, damit wir nicht bei jedem Update schreiben.
+   */
   async function syncBackendIfNeeded(currentSteps: number) {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
@@ -144,11 +188,14 @@ export default function Home() {
       if (ach.unlocked.length > 0) {
         Alert.alert("Neuer Erfolg freigeschaltet", ach.unlocked.join(", "));
       }
-    } catch (e: any) {
+    } catch (e) {
       console.log("Backend Sync Fehler:", e);
     }
   }
 
+  /**
+   * Stoppt Subscription und Polling sauber.
+   */
   function stopSensors() {
     pedometerSubRef.current?.remove();
     pedometerSubRef.current = null;
@@ -159,12 +206,16 @@ export default function Home() {
     }
   }
 
+  /**
+   * Startet (oder startet neu) die watchStepCount Subscription.
+   * Wichtig: watchStepCount liefert Schritte seit Start der Subscription -> wir rechnen über Delta.
+   */
   async function startWatchStepCount() {
     pedometerSubRef.current?.remove();
+
     pedometerSubRef.current = Pedometer.watchStepCount((result) => {
       lastAnyUpdateMsRef.current = Date.now();
 
-      // Beim ersten Event nur Baseline setzen
       if (lastSensorStepsRef.current === null) {
         lastSensorStepsRef.current = result.steps;
         return;
@@ -175,18 +226,25 @@ export default function Home() {
 
       if (delta <= 0) return;
 
-      setSteps((prev) => {
-        const next = prev + delta;
-
-        // Lokal speichern und Backend drosseln
-        saveTodayToStorage(next).catch(() => {});
-        syncBackendIfNeeded(next).catch(() => {});
-
-        return next;
-      });
+      const next = stepsRef.current + delta;
+      setStepsAndPersist(next);
     });
   }
 
+  /**
+   * Resubscribe-Helfer:
+   * Android drosselt Sensor-Events manchmal (Doze/Akkuoptimierung).
+   * Beim Zurückkommen in den Vordergrund starten wir die Subscription neu.
+   */
+  async function restartPedometerSubscription() {
+    lastAnyUpdateMsRef.current = Date.now();
+    lastSensorStepsRef.current = null;
+    await startWatchStepCount();
+  }
+
+  /**
+   * Prüft Availability + fordert Berechtigung an.
+   */
   async function ensurePedometerPermission() {
     const available = await Pedometer.isAvailableAsync();
     if (!available) {
@@ -207,52 +265,76 @@ export default function Home() {
   }
 
   /**
-   * Polling-Funktion:
-   * - versucht Tageswert zu holen (wenn möglich)
-   * - watchdog/resubscribe, falls lange keine Updates
+   * System-Korrektur:
+   * getStepCountAsync ist je nach Gerät/OS unterschiedlich zuverlässig.
+   * Wir übernehmen den Systemwert nur, wenn er:
+   * - größer als unser aktueller Stand ist, UND
+   * - nicht über längere Zeit exakt gleich bleibt (z.B. 272 fest)
+   */
+  function shouldAcceptSystemValue(systemSteps: number, nowMs: number) {
+    const current = stepsRef.current;
+
+    if (systemSteps <= current) return false;
+
+    if (lastSystemStepsRef.current === systemSteps) {
+      const msStale = nowMs - lastSystemChangedMsRef.current;
+      if (msStale > 20_000) return false;
+    } else {
+      lastSystemStepsRef.current = systemSteps;
+      lastSystemChangedMsRef.current = nowMs;
+    }
+
+    return true;
+  }
+
+  /**
+   * Polling:
+   * - täglicher Reset prüfen
+   * - watchdog/resubscribe, wenn lange keine Updates
+   * - optional systembasierte Korrektur (falls verfügbar)
    */
   async function poll() {
     await checkMidnightResetIfNeeded();
 
-    // Watchdog: wenn lange kein Update, resubscribe
     const nowMs = Date.now();
+
     if (nowMs - lastAnyUpdateMsRef.current > RESUBSCRIBE_AFTER_MS) {
       lastAnyUpdateMsRef.current = nowMs;
       lastSensorStepsRef.current = null;
       await startWatchStepCount();
     }
 
-    // Optional: wenn getStepCountAsync funktioniert, korrigiert er den Tageswert
-    // (auf deinem Gerät war es vorher oft 0 – dann bleibt es einfach wirkungslos)
     try {
-      if (!startOfDayRef.current) initStartOfDay();
-      const res = await Pedometer.getStepCountAsync(startOfDayRef.current!, new Date());
-
-      // Nur anwenden, wenn der Wert plausibel ist (nicht ständig 0) oder höher als unser lokaler Stand
-      if (res.steps > steps) {
-        setSteps(res.steps);
-        saveTodayToStorage(res.steps).catch(() => {});
-        syncBackendIfNeeded(res.steps).catch(() => {});
+      const res = await Pedometer.getStepCountAsync(startOfDayRef.current, new Date());
+      if (typeof res?.steps === "number" && shouldAcceptSystemValue(res.steps, nowMs)) {
+        setStepsAndPersist(res.steps);
         lastAnyUpdateMsRef.current = nowMs;
       }
     } catch {
-      // Ignorieren: nicht jedes Gerät unterstützt das zuverlässig
+      // Ignorieren
     }
   }
 
+  /**
+   * Startsequenz: Permission -> watchStepCount -> Polling starten.
+   */
   async function start() {
     const ok = await ensurePedometerPermission();
     if (!ok) return;
 
     await startWatchStepCount();
 
-    // Polling startet zusätzlich (Watchdog + optionale System-Korrektur)
     if (pollingTimerRef.current) clearInterval(pollingTimerRef.current);
     pollingTimerRef.current = setInterval(() => {
       poll().catch(() => {});
     }, POLL_INTERVAL_MS);
+
+    poll().catch(() => {});
   }
 
+  /**
+   * Initial: Storage laden + Sensor starten.
+   */
   useEffect(() => {
     (async () => {
       await loadTodayFromStorage();
@@ -260,6 +342,28 @@ export default function Home() {
     })();
 
     return () => stopSensors();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Stabilität: wenn die App wieder aktiv wird, Subscription neu starten.
+   * Das hilft gegen "eingefrorene" Sensor-Updates nach Screen-Off/Doze.
+   */
+  useEffect(() => {
+    let prevState: AppStateStatus = AppState.currentState;
+
+    const sub = AppState.addEventListener("change", (nextState) => {
+      const wasBackground = prevState === "inactive" || prevState === "background";
+      const isActive = nextState === "active";
+
+      if (wasBackground && isActive) {
+        restartPedometerSubscription().catch(() => {});
+      }
+
+      prevState = nextState;
+    });
+
+    return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -321,7 +425,7 @@ export default function Home() {
 
       <Text style={styles.sectionTitle}>Schnellzugriff</Text>
 
-      <TouchableOpacity style={styles.actionCard}>
+      <TouchableOpacity style={styles.actionCard} onPress={() => router.push("/erfolge")} accessibilityRole="button">
         <View style={styles.actionLeft}>
           <View style={[styles.iconBox, { backgroundColor: "#fef3c7" }]}>
             <FontAwesome5 name="medal" size={18} color="#fbbf24" />
