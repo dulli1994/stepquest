@@ -13,7 +13,9 @@
     },
     "android": {
       "permissions": [
-        "ACTIVITY_RECOGNITION"
+        "ACTIVITY_RECOGNITION",
+        "android.permission.health.READ_STEPS",
+        "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -43,7 +45,16 @@
           }
         }
       ],
-      "expo-background-task"
+      "expo-background-task",
+      "expo-health-connect",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

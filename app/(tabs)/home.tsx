@@ -8,6 +8,7 @@ import {
   AppState,
   AppStateStatus,
   Dimensions,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -224,7 +225,11 @@ export default function Home() {
       const delta = result.steps - lastSensorStepsRef.current;
       lastSensorStepsRef.current = result.steps;
 
+      // Sensor kann in seltenen Fällen zurückspringen oder einen unplausibel großen Sprung liefern.
+      // Negative/0 Deltas ignorieren.
+      // Sehr große Deltas behandeln wir als Glitch, um Spike-Writes und falsche Zählerstände zu vermeiden.
       if (delta <= 0) return;
+      if (delta > 5000) return;
 
       const next = stepsRef.current + delta;
       setStepsAndPersist(next);
@@ -238,7 +243,6 @@ export default function Home() {
    */
   async function restartPedometerSubscription() {
     lastAnyUpdateMsRef.current = Date.now();
-    lastSensorStepsRef.current = null;
     await startWatchStepCount();
   }
 
@@ -300,18 +304,21 @@ export default function Home() {
 
     if (nowMs - lastAnyUpdateMsRef.current > RESUBSCRIBE_AFTER_MS) {
       lastAnyUpdateMsRef.current = nowMs;
-      lastSensorStepsRef.current = null;
       await startWatchStepCount();
     }
 
-    try {
-      const res = await Pedometer.getStepCountAsync(startOfDayRef.current, new Date());
-      if (typeof res?.steps === "number" && shouldAcceptSystemValue(res.steps, nowMs)) {
-        setStepsAndPersist(res.steps);
-        lastAnyUpdateMsRef.current = nowMs;
+    // iOS: systembasierte Korrektur möglich.
+    // Android: getStepCountAsync ist nicht verfügbar -> nicht versuchen.
+    if (Platform.OS === "ios") {
+      try {
+        const res = await Pedometer.getStepCountAsync(startOfDayRef.current, new Date());
+        if (typeof res?.steps === "number" && shouldAcceptSystemValue(res.steps, nowMs)) {
+          setStepsAndPersist(res.steps);
+          lastAnyUpdateMsRef.current = nowMs;
+        }
+      } catch {
+        // Ignorieren
       }
-    } catch {
-      // Ignorieren
     }
   }
 

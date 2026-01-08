@@ -3,9 +3,12 @@ import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useState } from "react";
 import "react-native-reanimated";
 
+// Statischer Import: sorgt dafür, dass TaskManager.defineTask(...) beim Bundle-Load registriert ist
+import "../src/tasks/stepsBackgroundTask";
+import { registerStepsBackgroundTask } from "../src/tasks/stepsBackgroundTask";
+
 import { subscribeToAuth } from "../src/services/auth";
 import { ensureUserAndScore } from "../src/services/db";
-
 
 export const unstable_settings = {
   anchor: "(auth)",
@@ -16,20 +19,15 @@ export default function RootLayout() {
   const [isSignedIn, setIsSignedIn] = useState(false);
 
   /**
-   * Registrierung für Background Fetch / Task Manager.
+   * Registrierung für Background Task.
    * Wird einmalig beim App-Start versucht zu registrieren.
-   * Hinweis: Android entscheidet, wann der Task tatsächlich läuft.
+   * Hinweis: Android entscheidet, wann der Task tatsächlich läuft (best effort).
    */
-useEffect(() => {
-  (async () => {
-    try {
-      const mod = await import("../src/tasks/stepsBackgroundTask");
-      await mod.registerStepsBackgroundTask();
-    } catch (e) {
-      console.log("Background task not available in this build", e);
-    }
-  })();
-}, []);
+  useEffect(() => {
+    registerStepsBackgroundTask().catch((e) => {
+      console.log("Background task registration failed", e);
+    });
+  }, []);
 
   /**
    * Auth State Listener:
