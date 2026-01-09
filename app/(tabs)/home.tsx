@@ -10,6 +10,7 @@ import {
   AppStateStatus,
   Dimensions,
   Platform,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,7 +19,7 @@ import {
 } from "react-native";
 
 import { unlockAchievementsIfNeeded } from "../../src/services/achievements";
-import { updateHighscoreIfBetter } from "../../src/services/db";
+import { getWeeklySteps, updateHighscoreIfBetter } from "../../src/services/db";
 import { auth } from "../../src/services/firebase";
 
 const { width } = Dimensions.get("window");
@@ -39,9 +40,25 @@ function getStartOfDay(d: Date) {
   return start;
 }
 
+function getLast7DaysLabels() {
+  const days = ['S', 'M', 'D', 'M', 'D', 'F', 'S']; // Sonntag bis Samstag
+  const labels = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    labels.push(days[d.getDay()]);
+  }
+  return labels;
+}
+
 export default function Home() {
   const [steps, setSteps] = useState(0);
   const [showBatteryHint, setShowBatteryHint] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // HIER ist weeklyHeights definiert - das muss hier stehen!
+  const [weeklyHeights, setWeeklyHeights] = useState<number[]>([0, 0, 0, 0, 0, 0, 0]);
+  const [weekLabels, setWeekLabels] = useState<string[]>(getLast7DaysLabels());
 
   const stepsRef = useRef(0);
   const goal = 10000;
@@ -74,6 +91,30 @@ export default function Home() {
     syncBackendIfNeeded(nextSteps).catch(() => {});
   }
 
+  async function loadWeeklyData() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    try {
+      const data = await getWeeklySteps(uid);
+      
+      const mappedHeights = data.map((s: number) => {
+        const p = (s / goal) * 100;
+        return p > 100 ? 100 : p;
+      });
+      
+      setWeeklyHeights(mappedHeights);
+      setWeekLabels(getLast7DaysLabels());
+    } catch (e) {
+      console.log("Fehler beim Laden der Wochendaten:", e);
+    }
+  }
+
+  async function onRefresh() {
+    setRefreshing(true);
+    await loadWeeklyData();
+    setRefreshing(false);
+  }
+
   async function loadTodayFromStorage() {
     const todayKey = getDayKey(new Date());
     dayKeyRef.current = todayKey;
@@ -103,12 +144,15 @@ export default function Home() {
   async function checkMidnightResetIfNeeded() {
     const nowKey = getDayKey(new Date());
     if (nowKey === dayKeyRef.current) return;
+    
     dayKeyRef.current = nowKey;
     startOfDayRef.current = getStartOfDay(new Date());
     lastSensorStepsRef.current = null;
     lastSystemStepsRef.current = null;
     lastSystemChangedMsRef.current = 0;
+    
     setStepsAndPersist(0);
+    loadWeeklyData(); 
   }
 
   async function syncBackendIfNeeded(currentSteps: number) {
@@ -118,15 +162,19 @@ export default function Home() {
     const msSinceLast = nowMs - lastSyncAtMsRef.current;
     const stepDelta = currentSteps - lastSyncedStepsRef.current;
     const shouldSync = msSinceLast >= SYNC_INTERVAL_MS || stepDelta >= SYNC_MIN_STEP_DELTA;
+    
     if (!shouldSync) return;
+    
     lastSyncAtMsRef.current = nowMs;
     lastSyncedStepsRef.current = currentSteps;
+    
     try {
       await updateHighscoreIfBetter(uid, currentSteps);
       const ach = await unlockAchievementsIfNeeded(uid, currentSteps);
       if (ach.unlocked.length > 0) {
         Alert.alert("Neuer Erfolg freigeschaltet", ach.unlocked.join(", "));
       }
+      loadWeeklyData(); 
     } catch (e) {
       console.log("Backend Sync Fehler:", e);
     }
@@ -221,6 +269,7 @@ export default function Home() {
   useEffect(() => {
     (async () => {
       await loadTodayFromStorage();
+      await loadWeeklyData(); 
       await start();
     })();
     return () => stopSensors();
@@ -233,6 +282,7 @@ export default function Home() {
       const isActive = nextState === "active";
       if (wasBackground && isActive) {
         restartPedometerSubscription().catch(() => {});
+        loadWeeklyData(); 
       }
       prevState = nextState;
     });
@@ -240,7 +290,13 @@ export default function Home() {
   }, []);
 
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+    <ScrollView 
+      style={styles.container} 
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+      }
+    >
       <View style={styles.headerSpacer} />
       <Text style={styles.appTitle}>StepQuest</Text>
 
@@ -305,12 +361,14 @@ export default function Home() {
         <Ionicons name="chevron-forward" size={20} color="#ccc" />
       </TouchableOpacity>
 
-      {/* --- WOCHENÜBERSICHT --- */}
       <Text style={styles.sectionTitle}>Wochenübersicht</Text>
       <View style={styles.weeklyCard}>
         <View style={styles.chartContainer}>
-          {['M', 'D', 'M', 'D', 'F', 'S', 'S'].map((day, i) => {
-            const heights = [45, 80, 55, 95, 65, 40, 30]; 
+          {weekLabels.map((day, i) => {
+            // Logik: Höhe berechnen und Farbe setzen
+            const heightVal = Math.max(weeklyHeights[i] || 0, 5);
+            const barColor = weeklyHeights[i] >= 80 ? '#10b981' : '#8b5cf6';
+            
             return (
               <View key={i} style={styles.barColumn}>
                 <View style={styles.barTrack}>
@@ -318,8 +376,8 @@ export default function Home() {
                     style={[
                       styles.barFill, 
                       { 
-                        height: `${heights[i]}%`, 
-                        backgroundColor: heights[i] > 80 ? '#10b981' : '#8b5cf6' 
+                        height: `${heightVal}%`, 
+                        backgroundColor: barColor 
                       }
                     ]} 
                   />
@@ -340,36 +398,40 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#fcfcfc" },
   headerSpacer: { height: 60 },
   appTitle: { fontSize: 28, fontWeight: "900", color: "#1e293b", marginLeft: 22, marginBottom: 10 },
+  
   hintCard: { marginHorizontal: 20, marginBottom: 10, backgroundColor: "white", borderRadius: 18, padding: 14, borderWidth: 1, borderColor: "#e2e8f0" },
   hintHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
   hintTitle: { fontSize: 14, fontWeight: "800", color: "#0f172a" },
-  hintText: { color: "#334155", fontSize: 13, lineHeight: 18 },
-  mainCard: { margin: 20, borderRadius: 28, padding: 25, elevation: 10, shadowColor: "#8b5cf6", shadowOpacity: 0.3, shadowRadius: 15 },
-  cardHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 5 },
-  cardLabel: { color: "rgba(255,255,255,0.9)", fontSize: 16, fontWeight: "600" },
-  stepNumber: { color: "white", fontSize: 60, fontWeight: "bold", textAlign: "center", marginVertical: 10 },
-  goalText: { color: "rgba(255,255,255,0.7)", textAlign: "center", fontSize: 16, marginBottom: 25 },
-  progressContainer: { marginTop: 5 },
-  progressBarBg: { height: 12, backgroundColor: "rgba(255,255,255,0.2)", borderRadius: 6 },
-  progressBarFill: { height: 12, backgroundColor: "white", borderRadius: 6 },
-  progressPercent: { color: "white", textAlign: "right", marginTop: 10, fontSize: 13, fontWeight: "bold" },
-  statsRow: { flexDirection: "row", justifyContent: "space-between", paddingHorizontal: 20, marginBottom: 25 },
-  miniCard: { backgroundColor: "white", width: width * 0.43, padding: 18, borderRadius: 24, elevation: 2, shadowColor: "#000", shadowOpacity: 0.05, shadowRadius: 5 },
-  miniIconBg: { width: 38, height: 38, borderRadius: 12, justifyContent: "center", alignItems: "center", marginBottom: 12 },
-  miniValue: { fontSize: 24, fontWeight: "bold", color: "#1e293b" },
-  miniLabel: { color: "#94a3b8", fontSize: 13 },
-  sectionTitle: { fontSize: 20, fontWeight: "bold", marginLeft: 22, marginBottom: 15, color: "#1e293b" },
-  actionCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "white", marginHorizontal: 20, padding: 16, borderRadius: 20, marginBottom: 12, elevation: 1 },
+  hintText: { fontSize: 13, color: "#64748b", lineHeight: 18 },
+
+  mainCard: { marginHorizontal: 20, borderRadius: 24, padding: 20, marginBottom: 20 },
+  cardHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
+  cardLabel: { color: "rgba(255,255,255,0.9)", fontSize: 14, fontWeight: "600" },
+  stepNumber: { fontSize: 42, fontWeight: "900", color: "white", marginBottom: 2 },
+  goalText: { color: "rgba(255,255,255,0.8)", fontSize: 13, marginBottom: 18 },
+  progressContainer: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  progressBarBg: { flex: 1, height: 8, backgroundColor: "rgba(255,255,255,0.2)", borderRadius: 4, marginRight: 10 },
+  progressBarFill: { height: 8, backgroundColor: "white", borderRadius: 4 },
+  progressPercent: { color: "white", fontWeight: "700", fontSize: 12 },
+
+  statsRow: { flexDirection: "row", justifyContent: "space-between", marginHorizontal: 20, marginBottom: 20 },
+  miniCard: { flex: 0.48, backgroundColor: "white", padding: 16, borderRadius: 20, borderWidth: 1, borderColor: "#f1f5f9", alignItems: "center" },
+  miniIconBg: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center", marginBottom: 8 },
+  miniValue: { fontSize: 16, fontWeight: "800", color: "#1e293b", marginBottom: 2 },
+  miniLabel: { fontSize: 12, color: "#64748b", fontWeight: "500" },
+
+  sectionTitle: { fontSize: 18, fontWeight: "700", color: "#1e293b", marginLeft: 22, marginBottom: 12 },
+
+  actionCard: { marginHorizontal: 20, backgroundColor: "white", padding: 16, borderRadius: 20, borderWidth: 1, borderColor: "#f1f5f9", flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 20 },
   actionLeft: { flexDirection: "row", alignItems: "center" },
-  iconBox: { width: 48, height: 48, borderRadius: 14, justifyContent: "center", alignItems: "center", marginRight: 16 },
-  actionTitle: { fontSize: 17, fontWeight: "700", color: "#1e293b" },
+  iconBox: { width: 44, height: 44, borderRadius: 14, alignItems: "center", justifyContent: "center", marginRight: 14 },
+  actionTitle: { fontSize: 16, fontWeight: "700", color: "#1e293b", marginBottom: 2 },
   actionSub: { fontSize: 13, color: "#94a3b8" },
-  
-  // --- Diese Styles haben unten gefehlt ---
-  weeklyCard: { marginHorizontal: 20, backgroundColor: "white", padding: 22, borderRadius: 24, elevation: 2, shadowColor: "#000", shadowOpacity: 0.05, shadowRadius: 10, marginBottom: 20 },
-  chartContainer: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", height: 120 },
-  barColumn: { alignItems: "center", width: "12%" },
-  barTrack: { height: 100, width: 14, backgroundColor: "#f1f5f9", borderRadius: 8, justifyContent: "flex-end", overflow: "hidden" },
-  barFill: { width: "100%", borderRadius: 8 },
-  dayLabel: { marginTop: 10, fontSize: 12, color: "#94a3b8", fontWeight: "bold" },
+
+  weeklyCard: { marginHorizontal: 20, backgroundColor: "white", padding: 20, borderRadius: 24, borderWidth: 1, borderColor: "#f1f5f9" },
+  chartContainer: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", height: 150 },
+  barColumn: { alignItems: "center", flex: 1 },
+  barTrack: { width: 8, height: "100%", backgroundColor: "#f1f5f9", borderRadius: 4, justifyContent: "flex-end", overflow: "hidden" },
+  barFill: { width: "100%", borderRadius: 4 },
+  dayLabel: { marginTop: 8, fontSize: 12, color: "#94a3b8", fontWeight: "600" },
 });
