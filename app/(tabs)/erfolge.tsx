@@ -1,6 +1,8 @@
-import React, { useCallback, useState } from "react";
-import { View, Text, StyleSheet, FlatList, ActivityIndicator } from "react-native";
+import React, { useCallback, useMemo, useState } from "react";
+import { View, Text, StyleSheet, ActivityIndicator, SectionList, RefreshControl } from "react-native";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
+import { LinearGradient } from "expo-linear-gradient";
+import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
 
 import { db, auth } from "../../src/services/firebase";
@@ -14,138 +16,340 @@ type Achievement = {
   order?: number;
 };
 
+type AchievementRow = Achievement & {
+  isUnlocked: boolean;
+  pct: number; // 0..1
+  remaining: number;
+};
+
+function clamp01(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function formatInt(n: number) {
+  return Math.max(0, Math.floor(Number.isFinite(n) ? n : 0)).toLocaleString("de-DE");
+}
+
+/**
+ * Optional: Icon-Mapping nach Achievement-ID.
+ * Wenn du später in Firestore ein "icon" Feld pflegst, kannst du das hier ersetzen.
+ */
+function getIconNameForAchievement(id: string): keyof typeof Ionicons.glyphMap {
+  const key = (id || "").toLowerCase();
+  if (key.includes("erste") || key.includes("first")) return "walk-outline";
+  if (key.includes("meister") || key.includes("10k")) return "trophy-outline";
+  if (key.includes("woche") || key.includes("streak")) return "calendar-outline";
+  if (key.includes("blitz") || key.includes("speed")) return "flash-outline";
+  if (key.includes("stern") || key.includes("rank")) return "star-outline";
+  return "medal-outline";
+}
+
 export default function Erfolge() {
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const [myBest, setMyBest] = useState(0);
   const [unlocked, setUnlocked] = useState<Set<string>>(new Set());
   const [achievements, setAchievements] = useState<Achievement[]>([]);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   async function load() {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
 
+    setErrorMsg(null);
+
+    // 1) Achievement-Definitionen
+    const q = query(collection(db, "achievements"), orderBy("stepsRequired", "asc"));
+    const snap = await getDocs(q);
+    const defs: Achievement[] = snap.docs.map((d) => ({
+      id: d.id,
+      ...(d.data() as any),
+    }));
+    setAchievements(defs);
+
+    // 2) User unlockedAchievementIds
+    const user = await getUser(uid);
+    const unlockedIds = (user as any)?.unlockedAchievementIds ?? [];
+    setUnlocked(new Set<string>(unlockedIds));
+
+    // 3) Fortschritt: Bestwert (Tag)
+    const best = await getMyBest(uid);
+    setMyBest(best);
+  }
+
+  async function initialLoad() {
+    setLoading(true);
     try {
-      setLoading(true);
-
-      // 1) Achievements (global)
-      const q = query(collection(db, "achievements"), orderBy("stepsRequired", "asc"));
-      const snap = await getDocs(q);
-      const defs: Achievement[] = snap.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as any),
-      }));
-      setAchievements(defs);
-
-      // 2) User unlockedAchievementIds
-      const user = await getUser(uid);
-      const unlockedIds = (user as any)?.unlockedAchievementIds ?? [];
-      setUnlocked(new Set<string>(unlockedIds));
-
-      // 3) Fortschritt: Bestwert aus scores
-      const best = await getMyBest(uid);
-      setMyBest(best);
+      await load();
+    } catch (e) {
+      console.log("Erfolge load() Fehler:", e);
+      setErrorMsg("Konnte Erfolge nicht laden. Bitte erneut versuchen.");
     } finally {
       setLoading(false);
     }
   }
 
-  // Auto-Refresh beim Öffnen des Tabs
+  async function onRefresh() {
+    setRefreshing(true);
+    try {
+      await load();
+    } catch (e) {
+      console.log("Erfolge refresh Fehler:", e);
+      setErrorMsg("Konnte Erfolge nicht aktualisieren.");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   useFocusEffect(
     useCallback(() => {
-      load();
+      initialLoad();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
   );
+
+  const rows: AchievementRow[] = useMemo(() => {
+    const best = myBest;
+
+    const mapped = achievements.map((a) => {
+      const needed = Math.max(1, Number(a.stepsRequired) || 0);
+      const isUnlocked = unlocked.has(a.id) || best >= needed;
+      const pct = isUnlocked ? 1 : clamp01(best / needed);
+      const remaining = Math.max(0, needed - best);
+
+      return { ...a, isUnlocked, pct, remaining };
+    });
+
+    // Erst freigeschaltet, dann nächste dran
+    mapped.sort((x, y) => {
+      if (x.isUnlocked !== y.isUnlocked) return x.isUnlocked ? -1 : 1;
+      if (!x.isUnlocked && !y.isUnlocked && y.pct !== x.pct) return y.pct - x.pct;
+      return (x.stepsRequired ?? 0) - (y.stepsRequired ?? 0);
+    });
+
+    return mapped;
+  }, [achievements, unlocked, myBest]);
+
+  const unlockedRows = useMemo(() => rows.filter((r) => r.isUnlocked), [rows]);
+  const lockedRows = useMemo(() => rows.filter((r) => !r.isUnlocked), [rows]);
+
+  const sections = useMemo(
+    () => [
+      { title: `Freigeschaltet (${unlockedRows.length})`, data: unlockedRows },
+      { title: `Nicht freigeschaltet (${lockedRows.length})`, data: lockedRows },
+    ],
+    [unlockedRows, lockedRows]
+  );
+
+  const unlockedCount = unlockedRows.length;
+  const totalCount = rows.length;
+  const unlockedRatio = totalCount > 0 ? unlockedCount / totalCount : 0;
 
   if (loading) {
     return (
       <View style={styles.center}>
         <ActivityIndicator />
-        <Text style={styles.small}>Lade Erfolge…</Text>
+        <Text style={styles.loadingText}>Lade Erfolge…</Text>
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>ERFOLGE</Text>
+    <View style={styles.screen}>
+      {errorMsg ? <Text style={styles.errorText}>{errorMsg}</Text> : null}
 
-      <View style={styles.card}>
-        <Text style={styles.label}>Dein Fortschritt (Bestwert)</Text>
-        <Text style={styles.big}>{myBest}</Text>
-      </View>
-
-      <FlatList
-        data={achievements}
+      <SectionList
+        sections={sections}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={{ paddingBottom: 24 }}
+        stickySectionHeadersEnabled={false}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        contentContainerStyle={styles.listContent}
+        ListHeaderComponent={
+          <View>
+            <View style={styles.headerSpacer} />
+            <Text style={styles.appTitle}>StepQuest</Text>
+
+            <LinearGradient
+              colors={["#FDC700", "#FF6900"]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.heroCard}
+            >
+              <View style={styles.heroTopRow}>
+                <Text style={styles.heroTitle}>Erfolge</Text>
+                <Ionicons name="ribbon-outline" size={22} color="white" style={{ opacity: 0.95 }} />
+              </View>
+
+              <Text style={styles.heroCount}>
+                {unlockedCount}/{Math.max(0, totalCount)}
+              </Text>
+              <Text style={styles.heroSub}>Freigeschaltet</Text>
+
+              <View style={styles.heroProgressTrack}>
+                <View style={[styles.heroProgressFill, { width: `${Math.round(unlockedRatio * 100)}%` }]} />
+              </View>
+            </LinearGradient>
+          </View>
+        }
+        renderSectionHeader={({ section }) => <Text style={styles.sectionTitle}>{section.title}</Text>}
         renderItem={({ item }) => {
-          const isUnlocked = unlocked.has(item.id);
-          const needed = item.stepsRequired;
-          const pct = Math.min(1, myBest / needed);
-          const pctText = `${Math.round(pct * 100)}%`;
+          const needed = Math.max(1, Number(item.stepsRequired) || 0);
+          const iconName = getIconNameForAchievement(item.id);
 
           return (
-            <View style={[styles.item, isUnlocked && styles.itemUnlocked]}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.itemTitle}>
-                  {isUnlocked ? "✅ " : "🔒 "}
+            <View style={styles.itemCard}>
+              <View style={styles.iconBox}>
+                <Ionicons name={iconName} size={18} color="white" />
+              </View>
+
+              <View style={styles.itemTextCol}>
+                <Text style={styles.itemTitle} numberOfLines={1}>
                   {item.title}
                 </Text>
 
-                <Text style={styles.itemSub}>
-                  Ziel: {needed} Schritte • Fortschritt: {isUnlocked ? "Fertig" : pctText}
-                </Text>
-
                 <Text style={styles.itemSub} numberOfLines={1}>
-                  Unlock: {Array.isArray(item.unlockItemIds) ? item.unlockItemIds.join(", ") : "—"}
+                  Erreiche {formatInt(needed)} Schritte an einem Tag
                 </Text>
 
-                {!isUnlocked && (
-                  <View style={styles.progressOuter}>
-                    <View style={[styles.progressInner, { width: `${pct * 100}%` }]} />
+                {!item.isUnlocked ? (
+                  <View style={styles.itemProgressRow}>
+                    <View style={styles.itemProgressTrack}>
+                      <View style={[styles.itemProgressFill, { width: `${Math.round(item.pct * 100)}%` }]} />
+                    </View>
+                    <Text style={styles.itemProgressText}>
+                      {formatInt(myBest)}/{formatInt(needed)}
+                    </Text>
                   </View>
-                )}
+                ) : null}
               </View>
+
+              <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
             </View>
           );
         }}
+        ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
       />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 24, gap: 12, backgroundColor: "#fff" },
-  center: { flex: 1, justifyContent: "center", alignItems: "center", gap: 8, backgroundColor: "#fff" },
-  title: { fontSize: 24, fontWeight: "800", color: "#111" },
+  screen: { flex: 1, backgroundColor: "#fcfcfc" },
 
-  card: { borderWidth: 1, borderColor: "#ddd", borderRadius: 12, padding: 16, gap: 6 },
-  label: { color: "#555" },
-  big: { fontSize: 32, fontWeight: "900", color: "#111" },
-  small: { color: "#777" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", gap: 8, backgroundColor: "#fcfcfc" },
+  loadingText: { color: "#64748b" },
 
-  item: {
+  errorText: {
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 6,
+    backgroundColor: "white",
     borderWidth: 1,
-    borderColor: "#eee",
+    borderColor: "#fecaca",
+    color: "#b91c1c",
+    padding: 10,
     borderRadius: 12,
-    padding: 12,
-    marginTop: 8,
   },
-  itemUnlocked: { borderColor: "#111" },
-  itemTitle: { fontSize: 16, fontWeight: "800", color: "#111" },
-  itemSub: { marginTop: 4, color: "#555" },
 
-  progressOuter: {
-    marginTop: 8,
+  listContent: {
+    paddingBottom: 24,
+    paddingHorizontal: 0,
+    paddingTop: 0,
+  },
+
+  // Wie Home
+  headerSpacer: { height: 60 },
+  appTitle: { fontSize: 28, fontWeight: "900", color: "#1e293b", marginLeft: 22, marginBottom: 10 },
+
+  // Hero-Card: wie Home-Card platziert
+  heroCard: {
+    marginHorizontal: 20,
+    borderRadius: 28,
+    padding: 25,
+    marginBottom: 16,
+
+    // Shadow ähnlich Home (und Figma)
+    elevation: 10,
+    shadowColor: "#000",
+    shadowOpacity: 0.12,
+    shadowRadius: 15,
+    shadowOffset: { width: 0, height: 10 },
+  },
+
+  heroTopRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  heroTitle: { color: "rgba(255,255,255,0.95)", fontSize: 16, fontWeight: "800" },
+  heroCount: { marginTop: 10, color: "white", fontSize: 44, fontWeight: "900" },
+  heroSub: { marginTop: 2, color: "rgba(255,255,255,0.9)", fontSize: 13, fontWeight: "800" },
+
+  heroProgressTrack: {
+    marginTop: 14,
     height: 10,
-    width: "100%",
     borderRadius: 999,
-    backgroundColor: "#eee",
+    backgroundColor: "rgba(255,255,255,0.35)",
     overflow: "hidden",
   },
-  progressInner: {
+  heroProgressFill: {
     height: "100%",
-    backgroundColor: "#111",
+    borderRadius: 999,
+    backgroundColor: "white",
   },
+
+  sectionTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#64748b",
+    marginBottom: 10,
+    marginLeft: 22,
+    marginTop: 6,
+  },
+
+  itemCard: {
+    marginHorizontal: 20,
+    height: 82,
+    paddingHorizontal: 16,
+    backgroundColor: "white",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#eef2f7",
+
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+
+    shadowColor: "#000",
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 2,
+  },
+
+  iconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "#FF6900",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  itemTextCol: { flex: 1, justifyContent: "center" },
+  itemTitle: { fontSize: 14, fontWeight: "900", color: "#0f172a" },
+  itemSub: { marginTop: 2, fontSize: 12, color: "#64748b", fontWeight: "700" },
+
+  itemProgressRow: { marginTop: 8, flexDirection: "row", alignItems: "center", gap: 10 },
+  itemProgressTrack: {
+    flex: 1,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: "#e5e7eb",
+    overflow: "hidden",
+  },
+  itemProgressFill: {
+    height: "100%",
+    borderRadius: 999,
+    backgroundColor: "#3b82f6",
+  },
+  itemProgressText: { fontSize: 11, fontWeight: "800", color: "#94a3b8" },
 });

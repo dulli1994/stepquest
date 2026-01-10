@@ -1,7 +1,6 @@
-import { FontAwesome5, Ionicons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
-import { router } from "expo-router";
 import { Pedometer } from "expo-sensors";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -397,21 +396,6 @@ export default function Home() {
         </View>
       </View>
 
-      <Text style={styles.sectionTitle}>Schnellzugriff</Text>
-
-      <TouchableOpacity style={styles.actionCard} onPress={() => router.push("/erfolge")} accessibilityRole="button">
-        <View style={styles.actionLeft}>
-          <View style={[styles.iconBox, { backgroundColor: "#fef3c7" }]}>
-            <FontAwesome5 name="medal" size={18} color="#fbbf24" />
-          </View>
-          <View>
-            <Text style={styles.actionTitle}>Erfolge</Text>
-            <Text style={styles.actionSub}>Ansehen</Text>
-          </View>
-        </View>
-        <Ionicons name="chevron-forward" size={20} color="#ccc" />
-      </TouchableOpacity>
-
       <Text style={styles.sectionTitle}>Wochenübersicht</Text>
       <View style={styles.weeklyCard}>
         <View style={styles.chartContainer}>
@@ -457,8 +441,19 @@ const styles = StyleSheet.create({
   mainCard: { marginHorizontal: 20, borderRadius: 24, padding: 20, marginBottom: 20 },
   cardHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
   cardLabel: { color: "rgba(255,255,255,0.9)", fontSize: 14, fontWeight: "600" },
-  stepNumber: { fontSize: 42, fontWeight: "900", color: "white", marginBottom: 2 },
-  goalText: { color: "rgba(255,255,255,0.8)", fontSize: 13, marginBottom: 18 },
+  stepNumber: {
+    fontSize: 42,
+    fontWeight: "900",
+    color: "white",
+    marginBottom: 2,
+    textAlign: "center",
+  },
+  goalText: {
+    color: "rgba(255,255,255,0.8)",
+    fontSize: 13,
+    marginBottom: 18,
+    textAlign: "center",
+  },
   progressContainer: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   progressBarBg: { flex: 1, height: 8, backgroundColor: "rgba(255,255,255,0.2)", borderRadius: 4, marginRight: 10 },
   progressBarFill: { height: 8, backgroundColor: "white", borderRadius: 4 },
@@ -479,23 +474,6 @@ const styles = StyleSheet.create({
   miniLabel: { fontSize: 12, color: "#64748b", fontWeight: "500" },
 
   sectionTitle: { fontSize: 18, fontWeight: "700", color: "#1e293b", marginLeft: 22, marginBottom: 12 },
-
-  actionCard: {
-    marginHorizontal: 20,
-    backgroundColor: "white",
-    padding: 16,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "#f1f5f9",
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 20,
-  },
-  actionLeft: { flexDirection: "row", alignItems: "center" },
-  iconBox: { width: 44, height: 44, borderRadius: 14, alignItems: "center", justifyContent: "center", marginRight: 14 },
-  actionTitle: { fontSize: 16, fontWeight: "700", color: "#1e293b", marginBottom: 2 },
-  actionSub: { fontSize: 13, color: "#94a3b8" },
 
   weeklyCard: {
     marginHorizontal: 20,
