@@ -22,8 +22,8 @@ import {
   getCurrentStreak,
   getDailyGoal,
   getWeeklySteps,
-  upsertDailySteps,
   updateHighscoreIfBetter,
+  upsertDailySteps,
 } from "../../src/services/db";
 import { auth } from "../../src/services/firebase";
 import { readTodayStepsFromHealthConnect } from "../../src/services/healthConnect";
@@ -64,8 +64,13 @@ export default function Home() {
   const [showBatteryHint, setShowBatteryHint] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  // ✅ Neu: Speichert auch die rohen Schrittzahlen für die Anzeige beim Klick
+  const [weeklySteps, setWeeklySteps] = useState<number[]>([0, 0, 0, 0, 0, 0, 0]);
   const [weeklyHeights, setWeeklyHeights] = useState<number[]>([0, 0, 0, 0, 0, 0, 0]);
   const [weekLabels, setWeekLabels] = useState<string[]>(getLast7DaysLabels());
+  
+  // ✅ Neu: Welcher Balken wurde angeklickt? (Index)
+  const [selectedBarIndex, setSelectedBarIndex] = useState<number | null>(null);
 
   const [streakDays, setStreakDays] = useState(0);
 
@@ -139,6 +144,9 @@ export default function Home() {
 
     try {
       const data = await getWeeklySteps(uid);
+
+      // ✅ Speichern der echten Schrittzahlen für das Tooltip
+      setWeeklySteps(data);
 
       const mappedHeights = data.map((s: number) => {
         const p = (s / goalForCalc) * 100;
@@ -471,18 +479,52 @@ export default function Home() {
 
       <Text style={styles.sectionTitle}>Wochenübersicht</Text>
       <View style={styles.weeklyCard}>
+        {/* ✅ Grid Lines für bessere Lesbarkeit (Tabelle-Effekt) */}
+        <View style={StyleSheet.absoluteFill}>
+          <View style={styles.gridLineTop} />
+          <View style={styles.gridLineMiddle} />
+          <View style={styles.gridLineBottom} />
+        </View>
+
         <View style={styles.chartContainer}>
           {weekLabels.map((day, i) => {
             const heightVal = Math.max(weeklyHeights[i] || 0, 5);
-            const barColor = weeklyHeights[i] >= 80 ? "#10b981" : "#8b5cf6";
+            // Wenn ausgewählt, etwas heller machen oder Highlight-Farbe
+            const isSelected = selectedBarIndex === i;
+            const rawSteps = weeklySteps[i] || 0;
+            
+            // Logik für Farbe: Grün wenn Ziel (100% ~ Höhe 100) fast erreicht, sonst Lila
+            const barColor = weeklyHeights[i] >= 95 ? "#10b981" : "#8b5cf6";
 
             return (
-              <View key={i} style={styles.barColumn}>
+              <TouchableOpacity 
+                key={i} 
+                style={styles.barColumn}
+                activeOpacity={0.7}
+                onPress={() => setSelectedBarIndex(isSelected ? null : i)}
+              >
+                {/* Tooltip, wenn ausgewählt */}
+                {isSelected && (
+                  <View style={styles.tooltipContainer}>
+                    <Text style={styles.tooltipText}>{rawSteps.toLocaleString("de-DE")}</Text>
+                    <View style={styles.tooltipArrow} />
+                  </View>
+                )}
+
                 <View style={styles.barTrack}>
-                  <View style={[styles.barFill, { height: `${heightVal}%`, backgroundColor: barColor }]} />
+                  <View 
+                    style={[
+                      styles.barFill, 
+                      { 
+                        height: `${heightVal}%`, 
+                        backgroundColor: barColor,
+                        opacity: isSelected ? 1 : 0.85 // Visuelles Feedback bei Selektion
+                      }
+                    ]} 
+                  />
                 </View>
-                <Text style={styles.dayLabel}>{day}</Text>
-              </View>
+                <Text style={[styles.dayLabel, isSelected && styles.dayLabelSelected]}>{day}</Text>
+              </TouchableOpacity>
             );
           })}
         </View>
@@ -541,20 +583,76 @@ const styles = StyleSheet.create({
     marginHorizontal: 20,
     backgroundColor: "white",
     padding: 20,
+    paddingTop: 30, // Mehr Platz oben für Tooltips
     borderRadius: 24,
     borderWidth: 1,
     borderColor: "#f1f5f9",
+    position: "relative",
   },
-  chartContainer: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", height: 150 },
-  barColumn: { alignItems: "center", flex: 1 },
-  barTrack: {
-    width: 8,
-    height: "100%",
+  // Grid Lines Styles für den "Tabellen-Look"
+  gridLineTop: {
+    position: "absolute",
+    top: 30, // Entspricht ungefähr 100% Höhe im Chart
+    left: 20,
+    right: 20,
+    height: 1,
+    backgroundColor: "#e2e8f0",
+    borderStyle: "dashed",
+  },
+  gridLineMiddle: {
+    position: "absolute",
+    top: 105, // Ungefähr die Mitte
+    left: 20,
+    right: 20,
+    height: 1,
     backgroundColor: "#f1f5f9",
-    borderRadius: 4,
+  },
+  gridLineBottom: {
+    position: "absolute",
+    bottom: 40, // Basislinie
+    left: 20,
+    right: 20,
+    height: 1,
+    backgroundColor: "#e2e8f0",
+  },
+
+  chartContainer: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", height: 150 },
+  barColumn: { alignItems: "center", flex: 1, zIndex: 10 },
+  barTrack: {
+    width: 10, // Etwas breiter für Touch
+    height: "100%",
+    backgroundColor: "transparent", // Track unsichtbar, damit Grid wirkt
     justifyContent: "flex-end",
-    overflow: "hidden",
+    // overflow: "hidden", // Entfernt, damit Tooltip nicht abgeschnitten wird falls er darin wäre
   },
   barFill: { width: "100%", borderRadius: 4 },
   dayLabel: { marginTop: 8, fontSize: 12, color: "#94a3b8", fontWeight: "600" },
+  dayLabelSelected: { color: "#5b72ff", fontWeight: "800" },
+
+  // Tooltip Styles
+  tooltipContainer: {
+    position: "absolute",
+    top: -28,
+    backgroundColor: "#1e293b",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    alignItems: "center",
+    zIndex: 20,
+    minWidth: 40,
+  },
+  tooltipText: { color: "white", fontSize: 10, fontWeight: "700" },
+  tooltipArrow: {
+    width: 0,
+    height: 0,
+    backgroundColor: "transparent",
+    borderStyle: "solid",
+    borderLeftWidth: 4,
+    borderRightWidth: 4,
+    borderTopWidth: 4,
+    borderLeftColor: "transparent",
+    borderRightColor: "transparent",
+    borderTopColor: "#1e293b",
+    marginTop: -1,
+  }
 });
