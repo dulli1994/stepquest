@@ -5,7 +5,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
 
 import { auth } from "../services/firebase";
-import { updateHighscoreIfBetter } from "../services/db";
+import { getDayKey, updateHighscoreIfBetter } from "../services/db";
 import { unlockAchievementsIfNeeded } from "../services/achievements";
 import { readTodayStepsFromHealthConnect } from "../services/healthConnect";
 
@@ -34,19 +34,6 @@ const STORAGE_BG_LAST_SYNC_STEPS = "stepquest.bg.lastSyncSteps";
 const BG_SYNC_INTERVAL_MS = 60 * 60 * 1000; // 60 Minuten
 const BG_SYNC_MIN_STEP_DELTA = 250;
 
-/**
- * Hilfsfunktion: YYYY-MM-DD
- */
-function getDayKey(d: Date) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-/**
- * Start of day (00:00) als Date
- */
 function getStartOfDay(d: Date) {
   const start = new Date(d);
   start.setHours(0, 0, 0, 0);
@@ -80,7 +67,7 @@ async function getStepsFromStorageForToday(): Promise<number> {
 
 /**
  * Versucht, den "heute" Schrittwert zu bestimmen.
- * - Primär: Health Connect (Android), weil das auch ohne offene App weiterläuft (wenn Daten vorhanden + Permission)
+ * - Primär: Health Connect (Android)
  * - iOS: getStepCountAsync (History)
  * - Fallback: AsyncStorage (unser lokaler Counter)
  */
@@ -91,17 +78,15 @@ async function getBestTodaySteps(): Promise<number> {
   if (Platform.OS === "android") {
     try {
       const hcSteps = await readTodayStepsFromHealthConnect();
-
-      // null bedeutet: nicht verfügbar/kein Zugriff/Fehler im Modul
       if (typeof hcSteps === "number") {
-        // Wir korrigieren nur nach oben, damit wir lokale Zählung nicht kaputt machen.
+        // Nur nach oben korrigieren
         if (hcSteps > stepsFromStorage) {
           await AsyncStorage.setItem(STORAGE_STEPS_KEY, String(hcSteps));
           return hcSteps;
         }
       }
     } catch {
-      // Ignorieren: wenn HC nicht verfügbar oder Permission fehlt, nutzen wir Storage
+      // Ignorieren
     }
 
     return stepsFromStorage;
@@ -123,9 +108,6 @@ async function getBestTodaySteps(): Promise<number> {
   return stepsFromStorage;
 }
 
-/**
- * Prüft, ob wir im Background überhaupt syncen sollten (Drosselung).
- */
 async function shouldRunBackgroundSync(currentSteps: number): Promise<boolean> {
   const nowMs = Date.now();
 
@@ -151,11 +133,6 @@ async function markBackgroundSyncDone(currentSteps: number) {
   ]);
 }
 
-/**
- * Der eigentliche Background Task.
- * Hinweis: Auth muss bereits vorhanden sein.
- * Wenn auth.currentUser im Headless-Start nicht verfügbar ist, wird hier nichts gesynct.
- */
 TaskManager.defineTask(TASK_NAME, async () => {
   try {
     const user = auth.currentUser;
@@ -165,12 +142,12 @@ TaskManager.defineTask(TASK_NAME, async () => {
 
     const stepsToday = await getBestTodaySteps();
 
-    // Drosselung: nicht jedes Mal Firestore belasten
     const shouldSync = await shouldRunBackgroundSync(stepsToday);
     if (!shouldSync) {
       return BackgroundTask.BackgroundTaskResult.Success;
     }
 
+    // updateHighscoreIfBetter() schreibt bei dir bereits dailySteps mit
     await updateHighscoreIfBetter(user.uid, stepsToday);
     await unlockAchievementsIfNeeded(user.uid, stepsToday);
 
@@ -183,10 +160,6 @@ TaskManager.defineTask(TASK_NAME, async () => {
   }
 });
 
-/**
- * Registrierung des Background Tasks.
- * minimumInterval ist "Wunsch" in Sekunden – Android entscheidet dennoch.
- */
 export async function registerStepsBackgroundTask() {
   const status = await BackgroundTask.getStatusAsync();
 
@@ -200,13 +173,10 @@ export async function registerStepsBackgroundTask() {
   if (isRegistered) return;
 
   await BackgroundTask.registerTaskAsync(TASK_NAME, {
-    minimumInterval: 15 * 60, // 15 Minuten (Minimalwert)
+    minimumInterval: 15 * 60, // 15 Minuten
   });
 }
 
-/**
- * Optional: zum Debuggen/Resetten
- */
 export async function unregisterStepsBackgroundTask() {
   const isRegistered = await TaskManager.isTaskRegisteredAsync(TASK_NAME);
   if (!isRegistered) return;
