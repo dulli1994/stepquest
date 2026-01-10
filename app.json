@@ -15,6 +15,9 @@
       "permissions": [
         "ACTIVITY_RECOGNITION",
         "android.permission.health.READ_STEPS",
+        "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND",
+        "ACTIVITY_RECOGNITION",
+        "android.permission.health.READ_STEPS",
         "android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND"
       ],
       "adaptiveIcon": {
@@ -65,6 +68,12 @@
       "eas": {
         "projectId": "c4679a33-43fa-427c-9a49-cac9ebf439a7"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/c4679a33-43fa-427c-9a49-cac9ebf439a7"
     }
   }
 }
