@@ -73,10 +73,63 @@ export async function ensureUserAndScore(uid: string) {
 }
 
 /**
- * Speichert die Schritte für den aktuellen Tag in einer Unter-Collection.
- * Pfad: users/{uid}/dailySteps/{YYYY-MM-DD}
+ * Daily Goal lesen
  */
-async function saveDailyStepEntry(uid: string, steps: number) {
+export async function getDailyGoal(uid: string): Promise<number> {
+  const ref = doc(db, "users", uid);
+  const snap = await getDoc(ref);
+  const v = (snap.data() as any)?.dailyGoal;
+  return typeof v === "number" ? v : DEFAULT_DAILY_GOAL;
+}
+
+/**
+ * Hilfsfunktion: aktualisiert today's dailySteps.goal + goalReached anhand gespeicherter steps.
+ * (damit nach Goal-Änderung die Streak für "heute" sofort korrekt ist)
+ */
+async function syncTodayGoalFromStoredSteps(uid: string, goal: number) {
+  const dayKey = getDayKey(new Date());
+  const ref = doc(db, "users", uid, "dailySteps", dayKey);
+  const snap = await getDoc(ref);
+
+  if (!snap.exists()) return;
+
+  const data = snap.data() as any;
+  const steps = typeof data?.steps === "number" ? data.steps : 0;
+
+  await setDoc(
+    ref,
+    {
+      goal,
+      goalReached: steps >= goal,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+/**
+ * Daily Goal setzen (UserDoc) + heute sofort "goalReached" neu berechnen.
+ * Robust: erstellt users/{uid} notfalls (kein updateDoc-Crash)
+ */
+export async function setDailyGoal(uid: string, goal: number) {
+  await ensureUserDoc(uid);
+
+  const ref = doc(db, "users", uid);
+
+  // merge = safe, falls Dokument minimal/anders ist
+  await setDoc(ref, { dailyGoal: goal }, { merge: true });
+
+  await syncTodayGoalFromStoredSteps(uid, goal);
+}
+
+/**
+ * Upsert: Tageswert in Unter-Collection speichern (Basis: Weekly + Streak)
+ * Pfad: users/{uid}/dailySteps/{YYYY-MM-DD}
+ *
+ * Wichtig: wir speichern goal + goalReached pro Tag -> Streak bleibt korrekt,
+ * auch wenn das Ziel später geändert wird.
+ */
+export async function upsertDailySteps(uid: string, steps: number, goal: number) {
   const dayKey = getDayKey(new Date());
   const ref = doc(db, "users", uid, "dailySteps", dayKey);
 
@@ -85,6 +138,8 @@ async function saveDailyStepEntry(uid: string, steps: number) {
     {
       steps,
       date: dayKey,
+      goal,
+      goalReached: steps >= goal,
       updatedAt: serverTimestamp(),
     },
     { merge: true }
@@ -92,13 +147,9 @@ async function saveDailyStepEntry(uid: string, steps: number) {
 }
 
 /**
- * Updatet Highscore UND speichert den Tageswert für die Wochenübersicht.
+ * Updatet Highscore (Highscore ist unabhängig vom Tagesziel.)
  */
 export async function updateHighscoreIfBetter(uid: string, steps: number) {
-  // 1) Tageswert speichern (für Weekly-Chart/Streak-Basis)
-  await saveDailyStepEntry(uid, steps);
-
-  // 2) All-Time Highscore prüfen/updaten
   const ref = doc(db, "scores", uid);
   const snap = await getDoc(ref);
 
@@ -148,6 +199,44 @@ export async function getWeeklySteps(uid: string): Promise<number[]> {
   } catch (e) {
     console.error("getWeeklySteps error:", e);
     return [0, 0, 0, 0, 0, 0, 0];
+  }
+}
+
+/**
+ * Streak: zählt rückwärts ab heute, wie viele Tage in Folge goalReached=true sind.
+ * (goalReached wird pro Tag gespeichert -> historisch korrekt)
+ *
+ * 2. Parameter optional nur für Backwards-Compatibility (falls Home noch getCurrentStreak(uid, goal) nutzt).
+ */
+export async function getCurrentStreak(uid: string, _unusedGoal?: number): Promise<number> {
+  try {
+    const dailyRef = collection(db, "users", uid, "dailySteps");
+    const q = query(dailyRef, orderBy("date", "desc"), limit(60));
+    const snap = await getDocs(q);
+
+    const byDate: Record<string, { goalReached: boolean }> = {};
+    snap.docs.forEach((d) => {
+      const data = d.data() as any;
+      if (typeof data?.date === "string") {
+        byDate[data.date] = { goalReached: !!data.goalReached };
+      }
+    });
+
+    let streak = 0;
+    for (let i = 0; i < 60; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const key = getDayKey(d);
+
+      const entry = byDate[key];
+      if (entry?.goalReached) streak += 1;
+      else break;
+    }
+
+    return streak;
+  } catch (e) {
+    console.log("getCurrentStreak error:", e);
+    return 0;
   }
 }
 
