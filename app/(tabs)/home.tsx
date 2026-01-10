@@ -1,13 +1,13 @@
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
+import { useFocusEffect } from "expo-router";
 import { Pedometer } from "expo-sensors";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   AppState,
   AppStateStatus,
-  Dimensions,
   Platform,
   RefreshControl,
   ScrollView,
@@ -18,11 +18,15 @@ import {
 } from "react-native";
 
 import { unlockAchievementsIfNeeded } from "../../src/services/achievements";
-import { getWeeklySteps, updateHighscoreIfBetter } from "../../src/services/db";
+import {
+  getCurrentStreak,
+  getDailyGoal,
+  getWeeklySteps,
+  upsertDailySteps,
+  updateHighscoreIfBetter,
+} from "../../src/services/db";
 import { auth } from "../../src/services/firebase";
 import { readTodayStepsFromHealthConnect } from "../../src/services/healthConnect";
-
-const { width } = Dimensions.get("window");
 
 const STORAGE_DAY_KEY = "stepquest.today.dayKey";
 const STORAGE_STEPS_KEY = "stepquest.today.steps";
@@ -41,7 +45,7 @@ function getStartOfDay(d: Date) {
 }
 
 function getLast7DaysLabels() {
-  const days = ["S", "M", "D", "M", "D", "F", "S"]; // Sonntag bis Samstag
+  const days = ["S", "M", "D", "M", "D", "F", "S"];
   const labels: string[] = [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date();
@@ -49,6 +53,10 @@ function getLast7DaysLabels() {
     labels.push(days[d.getDay()]);
   }
   return labels;
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
 
 export default function Home() {
@@ -59,8 +67,14 @@ export default function Home() {
   const [weeklyHeights, setWeeklyHeights] = useState<number[]>([0, 0, 0, 0, 0, 0, 0]);
   const [weekLabels, setWeekLabels] = useState<string[]>(getLast7DaysLabels());
 
+  const [streakDays, setStreakDays] = useState(0);
+
+  // ✅ Goal dynamisch
+  const [goal, setGoal] = useState(10000);
+  const goalRef = useRef(10000);
+  const goalReadyRef = useRef(false);
+
   const stepsRef = useRef(0);
-  const goal = 10000;
   const progress = Math.min(steps / goal, 1);
 
   const pedometerSubRef = useRef<{ remove: () => void } | null>(null);
@@ -80,19 +94,46 @@ export default function Home() {
   const POLL_INTERVAL_MS = 2_000;
   const RESUBSCRIBE_AFTER_MS = 30_000;
 
-  function setStepsAndPersist(nextSteps: number) {
-    setSteps(nextSteps);
-    stepsRef.current = nextSteps;
+  async function loadGoal(): Promise<number> {
+    const uid = auth.currentUser?.uid;
+    if (!uid) {
+      goalReadyRef.current = false;
+      goalRef.current = 10000;
+      setGoal(10000);
+      return 10000;
+    }
 
-    Promise.all([
-      AsyncStorage.setItem(STORAGE_DAY_KEY, dayKeyRef.current),
-      AsyncStorage.setItem(STORAGE_STEPS_KEY, String(nextSteps)),
-    ]).catch(() => {});
+    try {
+      const gRaw = await getDailyGoal(uid);
+      const g = clamp(Math.round(gRaw), 100, 50000);
 
-    syncBackendIfNeeded(nextSteps).catch(() => {});
+      goalRef.current = g;
+      setGoal(g);
+      goalReadyRef.current = true;
+
+      return g;
+    } catch (e) {
+      console.log("Fehler beim Laden des Daily Goals:", e);
+      goalReadyRef.current = false;
+      return goalRef.current;
+    }
   }
 
-  async function loadWeeklyData() {
+  async function loadStreak() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) {
+      setStreakDays(0);
+      return;
+    }
+    try {
+      const s = await getCurrentStreak(uid);
+      setStreakDays(s);
+    } catch (e) {
+      console.log("Fehler beim Laden der Streak:", e);
+    }
+  }
+
+  async function loadWeeklyData(goalForCalc = goalRef.current) {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
 
@@ -100,7 +141,7 @@ export default function Home() {
       const data = await getWeeklySteps(uid);
 
       const mappedHeights = data.map((s: number) => {
-        const p = (s / goal) * 100;
+        const p = (s / goalForCalc) * 100;
         return p > 100 ? 100 : p;
       });
 
@@ -111,9 +152,33 @@ export default function Home() {
     }
   }
 
+  function setStepsAndPersist(nextSteps: number) {
+    const prev = stepsRef.current;
+    const g = goalRef.current;
+
+    setSteps(nextSteps);
+    stepsRef.current = nextSteps;
+
+    Promise.all([
+      AsyncStorage.setItem(STORAGE_DAY_KEY, dayKeyRef.current),
+      AsyncStorage.setItem(STORAGE_STEPS_KEY, String(nextSteps)),
+    ]).catch(() => {});
+
+    // ✅ Sofortiger Goal-Reached Write (max 1x/Tag) — nur wenn Goal geladen ist
+    const uid = auth.currentUser?.uid;
+    if (uid && goalReadyRef.current && prev < g && nextSteps >= g) {
+      upsertDailySteps(uid, nextSteps, g)
+        .then(() => loadStreak())
+        .catch(() => {});
+    }
+
+    syncBackendIfNeeded(nextSteps).catch(() => {});
+  }
+
   async function onRefresh() {
     setRefreshing(true);
-    await loadWeeklyData();
+    const g = await loadGoal();
+    await Promise.all([loadWeeklyData(g), loadStreak()]);
     setRefreshing(false);
   }
 
@@ -156,7 +221,10 @@ export default function Home() {
     lastSystemChangedMsRef.current = 0;
 
     setStepsAndPersist(0);
-    loadWeeklyData();
+
+    const g = await loadGoal();
+    loadWeeklyData(g);
+    loadStreak();
   }
 
   async function syncBackendIfNeeded(currentSteps: number) {
@@ -167,13 +235,17 @@ export default function Home() {
     const msSinceLast = nowMs - lastSyncAtMsRef.current;
     const stepDelta = currentSteps - lastSyncedStepsRef.current;
     const shouldSync = msSinceLast >= SYNC_INTERVAL_MS || stepDelta >= SYNC_MIN_STEP_DELTA;
-
     if (!shouldSync) return;
 
     lastSyncAtMsRef.current = nowMs;
     lastSyncedStepsRef.current = currentSteps;
 
     try {
+      // ✅ dailySteps nur, wenn Goal geladen ist
+      if (goalReadyRef.current) {
+        await upsertDailySteps(uid, currentSteps, goalRef.current);
+      }
+
       await updateHighscoreIfBetter(uid, currentSteps);
 
       const ach = await unlockAchievementsIfNeeded(uid, currentSteps);
@@ -181,7 +253,8 @@ export default function Home() {
         Alert.alert("Neuer Erfolg freigeschaltet", ach.unlocked.join(", "));
       }
 
-      loadWeeklyData();
+      loadWeeklyData(goalRef.current);
+      loadStreak();
     } catch (e) {
       console.log("Backend Sync Fehler:", e);
     }
@@ -190,7 +263,6 @@ export default function Home() {
   function stopSensors() {
     pedometerSubRef.current?.remove();
     pedometerSubRef.current = null;
-
     if (pollingTimerRef.current) {
       clearInterval(pollingTimerRef.current);
       pollingTimerRef.current = null;
@@ -199,7 +271,6 @@ export default function Home() {
 
   async function startWatchStepCount() {
     pedometerSubRef.current?.remove();
-
     pedometerSubRef.current = Pedometer.watchStepCount((result) => {
       lastAnyUpdateMsRef.current = Date.now();
 
@@ -211,7 +282,6 @@ export default function Home() {
       const delta = result.steps - lastSensorStepsRef.current;
       lastSensorStepsRef.current = result.steps;
 
-      // Glitch-Filter: negative/0 ignorieren, riesige Sprünge ebenfalls.
       if (delta <= 0 || delta > 5000) return;
 
       const next = stepsRef.current + delta;
@@ -230,13 +300,11 @@ export default function Home() {
       Alert.alert("Schrittzähler nicht verfügbar", "Dein Gerät unterstützt den Schrittzähler eventuell nicht.");
       return false;
     }
-
     const perm = await Pedometer.requestPermissionsAsync();
     if (!perm.granted) {
       Alert.alert("Berechtigung fehlt", "Bitte erlaube den Zugriff auf körperliche Aktivität.");
       return false;
     }
-
     return true;
   }
 
@@ -251,7 +319,6 @@ export default function Home() {
       lastSystemStepsRef.current = systemSteps;
       lastSystemChangedMsRef.current = nowMs;
     }
-
     return true;
   }
 
@@ -264,8 +331,6 @@ export default function Home() {
       await startWatchStepCount();
     }
 
-    // iOS: systembasierte Korrektur möglich.
-    // Android: getStepCountAsync ist nicht verfügbar -> nicht versuchen.
     if (Platform.OS === "ios") {
       try {
         const res = await Pedometer.getStepCountAsync(startOfDayRef.current, new Date());
@@ -273,9 +338,7 @@ export default function Home() {
           setStepsAndPersist(res.steps);
           lastAnyUpdateMsRef.current = nowMs;
         }
-      } catch {
-        // Ignorieren
-      }
+      } catch {}
     }
   }
 
@@ -293,22 +356,28 @@ export default function Home() {
     poll().catch(() => {});
   }
 
+  // ✅ Beim Öffnen des Tabs (z.B. zurück vom Profil): Goal neu laden und UI neu berechnen
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        const g = await loadGoal();
+        await Promise.all([loadWeeklyData(g), loadStreak()]);
+      })().catch(() => {});
+    }, [])
+  );
+
   useEffect(() => {
     (async () => {
       await loadTodayFromStorage();
-      await loadWeeklyData();
+      const g = await loadGoal();
+      await Promise.all([loadWeeklyData(g), loadStreak()]);
       await start();
     })();
 
     return () => stopSensors();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /**
-   * Stabilität: wenn die App wieder aktiv wird, Subscription neu starten.
-   * Zusätzlich:
-   * - Wochen-Daten beim Resume neu laden
-   * - Android: beim Resume sofort Health-Connect-Wert nachziehen
-   */
   useEffect(() => {
     let prevState: AppStateStatus = AppState.currentState;
 
@@ -319,7 +388,10 @@ export default function Home() {
       if (wasBackground && isActive) {
         restartPedometerSubscription().catch(() => {});
 
-        loadWeeklyData();
+        loadGoal().then((g) => {
+          loadWeeklyData(g);
+          loadStreak();
+        });
 
         if (Platform.OS === "android") {
           readTodayStepsFromHealthConnect()
@@ -336,6 +408,7 @@ export default function Home() {
     });
 
     return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
@@ -391,7 +464,7 @@ export default function Home() {
           <View style={[styles.miniIconBg, { backgroundColor: "#fff7ed" }]}>
             <Ionicons name="flame" size={18} color="#f97316" />
           </View>
-          <Text style={styles.miniValue}>7 Tage</Text>
+          <Text style={styles.miniValue}>{streakDays} Tage</Text>
           <Text style={styles.miniLabel}>Serie</Text>
         </View>
       </View>
@@ -441,19 +514,8 @@ const styles = StyleSheet.create({
   mainCard: { marginHorizontal: 20, borderRadius: 24, padding: 20, marginBottom: 20 },
   cardHeader: { flexDirection: "row", justifyContent: "space-between", marginBottom: 8 },
   cardLabel: { color: "rgba(255,255,255,0.9)", fontSize: 14, fontWeight: "600" },
-  stepNumber: {
-    fontSize: 42,
-    fontWeight: "900",
-    color: "white",
-    marginBottom: 2,
-    textAlign: "center",
-  },
-  goalText: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 13,
-    marginBottom: 18,
-    textAlign: "center",
-  },
+  stepNumber: { fontSize: 42, fontWeight: "900", color: "white", marginBottom: 2, textAlign: "center" },
+  goalText: { color: "rgba(255,255,255,0.8)", fontSize: 13, marginBottom: 18, textAlign: "center" },
   progressContainer: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   progressBarBg: { flex: 1, height: 8, backgroundColor: "rgba(255,255,255,0.2)", borderRadius: 4, marginRight: 10 },
   progressBarFill: { height: 8, backgroundColor: "white", borderRadius: 4 },
