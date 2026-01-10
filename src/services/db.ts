@@ -8,7 +8,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  updateDoc
+  updateDoc,
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -31,9 +31,10 @@ export type ScoreDoc = {
 export const DEFAULT_DAILY_GOAL = 8000;
 
 /**
- * Hilfsfunktion für den Datums-Key (YYYY-MM-DD)
+ * Hilfsfunktion für den Datums-Key (YYYY-MM-DD).
+ * Bewusst lokale Zeit (nicht UTC), damit Tageswechsel mit dem Gerät übereinstimmt.
  */
-function getDayKey(d: Date) {
+export function getDayKey(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
@@ -44,6 +45,7 @@ export async function ensureUserDoc(uid: string) {
   const ref = doc(db, "users", uid);
   const snap = await getDoc(ref);
   if (snap.exists()) return;
+
   const data: UserDoc = {
     dailyGoal: DEFAULT_DAILY_GOAL,
     createdAt: serverTimestamp(),
@@ -58,6 +60,7 @@ export async function ensureScoreDoc(uid: string) {
   const ref = doc(db, "scores", uid);
   const snap = await getDoc(ref);
   if (snap.exists()) return;
+
   const data: ScoreDoc = {
     bestDailySteps: 0,
     updatedAt: serverTimestamp(),
@@ -70,28 +73,32 @@ export async function ensureUserAndScore(uid: string) {
 }
 
 /**
- * NEU: Speichert die Schritte für den AKTUELLEN Tag in einer Unter-Collection
- * Das brauchen wir für das Diagramm!
+ * Speichert die Schritte für den aktuellen Tag in einer Unter-Collection.
+ * Pfad: users/{uid}/dailySteps/{YYYY-MM-DD}
  */
 async function saveDailyStepEntry(uid: string, steps: number) {
   const dayKey = getDayKey(new Date());
-  // Pfad: users/{uid}/dailySteps/{YYYY-MM-DD}
   const ref = doc(db, "users", uid, "dailySteps", dayKey);
-  await setDoc(ref, {
-    steps: steps,
-    date: dayKey,
-    updatedAt: serverTimestamp()
-  }, { merge: true });
+
+  await setDoc(
+    ref,
+    {
+      steps,
+      date: dayKey,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true }
+  );
 }
 
 /**
- * Updatet Highscore UND speichert den Tageswert für das Diagramm
+ * Updatet Highscore UND speichert den Tageswert für die Wochenübersicht.
  */
 export async function updateHighscoreIfBetter(uid: string, steps: number) {
-  // 1. Den Tageswert für die Wochenübersicht speichern
+  // 1) Tageswert speichern (für Weekly-Chart/Streak-Basis)
   await saveDailyStepEntry(uid, steps);
 
-  // 2. Den All-Time Highscore prüfen/updaten
+  // 2) All-Time Highscore prüfen/updaten
   const ref = doc(db, "scores", uid);
   const snap = await getDoc(ref);
 
@@ -107,33 +114,34 @@ export async function updateHighscoreIfBetter(uid: string, steps: number) {
     await updateDoc(ref, { bestDailySteps: steps, updatedAt: serverTimestamp() });
     return { updated: true, bestDailySteps: steps };
   }
+
   return { updated: false, bestDailySteps: best };
 }
 
 /**
- * NEU: Holt die Schritte der letzten 7 Tage für die Wochenübersicht
+ * Holt die Schritte der letzten 7 Tage für die Wochenübersicht.
+ * Rückgabe: Array mit 7 Werten, ältester -> neuester (heute ganz rechts).
  */
 export async function getWeeklySteps(uid: string): Promise<number[]> {
   try {
     const dailyRef = collection(db, "users", uid, "dailySteps");
-    // Hol die letzten 7 Einträge, sortiert nach Datum
     const q = query(dailyRef, orderBy("date", "desc"), limit(7));
     const snap = await getDocs(q);
 
-    // Wir erstellen ein Mapping von Datum -> Schritten
     const results: Record<string, number> = {};
-    snap.docs.forEach(d => {
-      const data = d.data();
-      results[data.date] = data.steps;
+    snap.docs.forEach((d) => {
+      const data = d.data() as any;
+      if (typeof data?.date === "string") {
+        results[data.date] = typeof data?.steps === "number" ? data.steps : 0;
+      }
     });
 
-    // Wir bauen das Array für die letzten 7 Tage (heute ganz rechts)
     const chartData: number[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const key = getDayKey(d);
-      chartData.push(results[key] || 0); // 0 falls kein Eintrag existiert
+      chartData.push(results[key] || 0);
     }
 
     return chartData;
