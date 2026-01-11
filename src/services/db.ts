@@ -9,6 +9,7 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
+  runTransaction,
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -21,6 +22,11 @@ export type UserDoc = {
     skinTone: string;
     equippedItemIds: string[];
   };
+
+  // ✅ neu (optional, weil alte User es evtl. noch nicht haben)
+  username?: string;
+  usernameLower?: string;
+  updatedAt?: any;
 };
 
 export type ScoreDoc = {
@@ -41,10 +47,12 @@ export function getDayKey(d: Date) {
   return `${y}-${m}-${day}`;
 }
 
+/**
+ * ✅ Wichtig: niemals "hart überschreiben", sonst gehen username-Felder verloren.
+ * Daher immer merge:true.
+ */
 export async function ensureUserDoc(uid: string) {
   const ref = doc(db, "users", uid);
-  const snap = await getDoc(ref);
-  if (snap.exists()) return;
 
   const data: UserDoc = {
     dailyGoal: DEFAULT_DAILY_GOAL,
@@ -53,23 +61,108 @@ export async function ensureUserDoc(uid: string) {
     unlockedItemIds: [],
     avatar: { skinTone: "default", equippedItemIds: [] },
   };
-  await setDoc(ref, data);
+
+  // ✅ merge verhindert clobber
+  await setDoc(ref, data, { merge: true });
 }
 
 export async function ensureScoreDoc(uid: string) {
   const ref = doc(db, "scores", uid);
-  const snap = await getDoc(ref);
-  if (snap.exists()) return;
 
   const data: ScoreDoc = {
     bestDailySteps: 0,
     updatedAt: serverTimestamp(),
   };
-  await setDoc(ref, data);
+
+  // ✅ safe
+  await setDoc(ref, data, { merge: true });
 }
 
 export async function ensureUserAndScore(uid: string) {
   await Promise.all([ensureUserDoc(uid), ensureScoreDoc(uid)]);
+}
+
+/**
+ * Username normalisieren
+ */
+function normalizeUsername(raw: string) {
+  const display = raw.trim();
+  const lower = display.toLowerCase();
+  return { display, lower };
+}
+
+/**
+ * ✅ Username eindeutig reservieren + in users/{uid} speichern
+ *
+ * Registry: usernames/{usernameLower}
+ *  - verhindert Duplikate (case-insensitive)
+ *  - Transaction schützt vor Race-Conditions
+ *
+ * Speichert außerdem in users/{uid}:
+ *  - username
+ *  - usernameLower
+ */
+export async function setUsername(uid: string, username: string) {
+  const { display, lower } = normalizeUsername(username);
+
+  if (!display) throw new Error("Benutzername darf nicht leer sein.");
+  if (lower.length > 20) throw new Error("Benutzername darf maximal 20 Zeichen haben.");
+
+  const userRef = doc(db, "users", uid);
+  const nameRef = doc(db, "usernames", lower);
+
+  await runTransaction(db, async (tx) => {
+    const [nameSnap, userSnap] = await Promise.all([tx.get(nameRef), tx.get(userRef)]);
+
+    // UserDoc sicherstellen (damit setUsername auch direkt nach register() stabil ist)
+    if (!userSnap.exists()) {
+      tx.set(
+        userRef,
+        {
+          dailyGoal: DEFAULT_DAILY_GOAL,
+          createdAt: serverTimestamp(),
+          unlockedAchievementIds: [],
+          unlockedItemIds: [],
+          avatar: { skinTone: "default", equippedItemIds: [] },
+        },
+        { merge: true }
+      );
+    }
+
+    // Name schon vergeben?
+    if (nameSnap.exists()) {
+      const existing = nameSnap.data() as any;
+      if (existing?.uid && existing.uid !== uid) {
+        throw new Error("Benutzername ist leider schon vergeben.");
+      }
+    }
+
+    // Registry setzen/halten
+    tx.set(
+      nameRef,
+      {
+        uid,
+        username: display,
+        usernameLower: lower,
+        updatedAt: serverTimestamp(),
+        createdAt: nameSnap.exists()
+          ? (nameSnap.data() as any)?.createdAt ?? serverTimestamp()
+          : serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    // Im User-Dokument speichern
+    tx.set(
+      userRef,
+      {
+        username: display,
+        usernameLower: lower,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
 }
 
 /**
@@ -154,7 +247,7 @@ export async function updateHighscoreIfBetter(uid: string, steps: number) {
   const snap = await getDoc(ref);
 
   if (!snap.exists()) {
-    await setDoc(ref, { bestDailySteps: steps, updatedAt: serverTimestamp() });
+    await setDoc(ref, { bestDailySteps: steps, updatedAt: serverTimestamp() }, { merge: true });
     return { updated: true, bestDailySteps: steps };
   }
 
