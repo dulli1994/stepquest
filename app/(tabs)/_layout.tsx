@@ -30,6 +30,7 @@ export default function TabLayout() {
         }}
       />
 
+
       <Tabs.Screen
         name="erfolge"
         options={{
@@ -49,6 +50,8 @@ export default function TabLayout() {
           ),
         }}
       />
+
+      
     </Tabs>
   );
 }

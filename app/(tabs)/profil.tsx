@@ -152,7 +152,13 @@ export default function Profil() {
       <Pressable style={styles.logoutBtn} onPress={onLogout}>
         <Text style={styles.logoutText}>Logout</Text>
       </Pressable>
+        
+        <Pressable onPress={() => router.push("/impressum" as any)}>
+      <Text style={styles.imprintLink}>Impressum</Text>
+      </Pressable>
     </View>
+
+    
   );
 }
 
