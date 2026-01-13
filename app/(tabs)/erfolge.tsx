@@ -1,12 +1,23 @@
-import React, { useCallback, useMemo, useState } from "react";
-import { View, Text, StyleSheet, ActivityIndicator, SectionList, RefreshControl } from "react-native";
-import { collection, getDocs, orderBy, query } from "firebase/firestore";
-import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect } from "expo-router";
+import { collection, getDocs, orderBy, query } from "firebase/firestore";
+import React, { useCallback, useMemo, useState } from "react";
+import { ActivityIndicator, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
 
-import { db, auth } from "../../src/services/firebase";
 import { getMyBest, getUser } from "../../src/services/db";
+import { auth, db } from "../../src/services/firebase";
+
+// --- KONFIGURATION: BELOHNUNGEN ---
+// Mapping von Achievement-ID-Teilen zu den angezeigten Belohnungen.
+// "Erste Schritte" ist hier NICHT dabei, also wird dort nichts angezeigt.
+const UNLOCK_REWARDS: Record<string, string> = {
+  "spaziergang": "Kopfbedeckung: Blaue Cap",
+  "enthusiast": "Outfit: Blaues Shirt & Streifen",
+  "unaufhaltsam": "Outfit: Schwarzer Tracksuit",
+  "sohlenzerstoerer": "Effekt: Brennende Sohlen",
+  "meister": "Accessoire: Goldkette (SQ)",
+};
 
 type Achievement = {
   id: string;
@@ -32,8 +43,7 @@ function formatInt(n: number) {
 }
 
 /**
- * Optional: Icon-Mapping nach Achievement-ID.
- * Wenn du später in Firestore ein "icon" Feld pflegst, kannst du das hier ersetzen.
+ * Icon-Mapping für die Achievements
  */
 function getIconNameForAchievement(id: string): keyof typeof Ionicons.glyphMap {
   const key = (id || "").toLowerCase();
@@ -43,6 +53,18 @@ function getIconNameForAchievement(id: string): keyof typeof Ionicons.glyphMap {
   if (key.includes("blitz") || key.includes("speed")) return "flash-outline";
   if (key.includes("stern") || key.includes("rank")) return "star-outline";
   return "medal-outline";
+}
+
+/**
+ * Hilfsfunktion: Prüft, ob für die Achievement-ID eine Belohnung hinterlegt ist.
+ */
+function getRewardName(id: string): string | null {
+  const lowerId = (id || "").toLowerCase();
+  
+  // Wir iterieren durch unsere Config und schauen, ob der Key in der ID vorkommt
+  const foundKey = Object.keys(UNLOCK_REWARDS).find(k => lowerId.includes(k));
+  
+  return foundKey ? UNLOCK_REWARDS[foundKey] : null;
 }
 
 export default function Erfolge() {
@@ -60,7 +82,7 @@ export default function Erfolge() {
 
     setErrorMsg(null);
 
-    // 1) Achievement-Definitionen
+    // 1) Achievement-Definitionen laden
     const q = query(collection(db, "achievements"), orderBy("stepsRequired", "asc"));
     const snap = await getDocs(q);
     const defs: Achievement[] = snap.docs.map((d) => ({
@@ -69,7 +91,7 @@ export default function Erfolge() {
     }));
     setAchievements(defs);
 
-    // 2) User unlockedAchievementIds
+    // 2) User unlockedAchievementIds laden
     const user = await getUser(uid);
     const unlockedIds = (user as any)?.unlockedAchievementIds ?? [];
     setUnlocked(new Set<string>(unlockedIds));
@@ -122,7 +144,7 @@ export default function Erfolge() {
       return { ...a, isUnlocked, pct, remaining };
     });
 
-    // Erst freigeschaltet, dann nächste dran
+    // Sortierung: Erst freigeschaltet, dann pct, dann steps
     mapped.sort((x, y) => {
       if (x.isUnlocked !== y.isUnlocked) return x.isUnlocked ? -1 : 1;
       if (!x.isUnlocked && !y.isUnlocked && y.pct !== x.pct) return y.pct - x.pct;
@@ -197,6 +219,7 @@ export default function Erfolge() {
         renderItem={({ item }) => {
           const needed = Math.max(1, Number(item.stepsRequired) || 0);
           const iconName = getIconNameForAchievement(item.id);
+          const rewardName = getRewardName(item.id); // Belohnung ermitteln
 
           return (
             <View style={styles.itemCard}>
@@ -212,6 +235,15 @@ export default function Erfolge() {
                 <Text style={styles.itemSub} numberOfLines={1}>
                   Erreiche {formatInt(needed)} Schritte an einem Tag
                 </Text>
+
+                {/* --- NEU: ANZEIGE DER BELOHNUNG --- */}
+                {/* Nur anzeigen, wenn eine Belohnung existiert */}
+                {rewardName && (
+                  <View style={styles.rewardBadge}>
+                    <Ionicons name="gift-outline" size={10} color="#3b82f6" style={{ marginRight: 4 }} />
+                    <Text style={styles.rewardText}>{rewardName}</Text>
+                  </View>
+                )}
 
                 {!item.isUnlocked ? (
                   <View style={styles.itemProgressRow}>
@@ -259,18 +291,14 @@ const styles = StyleSheet.create({
     paddingTop: 0,
   },
 
-  // Wie Home
   headerSpacer: { height: 60 },
   appTitle: { fontSize: 28, fontWeight: "900", color: "#1e293b", marginLeft: 22, marginBottom: 10 },
 
-  // Hero-Card: wie Home-Card platziert
   heroCard: {
     marginHorizontal: 20,
     borderRadius: 28,
     padding: 25,
     marginBottom: 16,
-
-    // Shadow ähnlich Home (und Figma)
     elevation: 10,
     shadowColor: "#000",
     shadowOpacity: 0.12,
@@ -307,7 +335,9 @@ const styles = StyleSheet.create({
 
   itemCard: {
     marginHorizontal: 20,
-    height: 82,
+    // Variable Höhe für Reward-Badge zulassen
+    minHeight: 82,
+    paddingVertical: 14,
     paddingHorizontal: 16,
     backgroundColor: "white",
     borderRadius: 14,
@@ -337,6 +367,23 @@ const styles = StyleSheet.create({
   itemTextCol: { flex: 1, justifyContent: "center" },
   itemTitle: { fontSize: 14, fontWeight: "900", color: "#0f172a" },
   itemSub: { marginTop: 2, fontSize: 12, color: "#64748b", fontWeight: "700" },
+
+  // --- STYLES FÜR DEN BELOHNUNGS-BADGE ---
+  rewardBadge: {
+    marginTop: 6,
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#eff6ff",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    alignSelf: "flex-start",
+  },
+  rewardText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#3b82f6",
+  },
 
   itemProgressRow: { marginTop: 8, flexDirection: "row", alignItems: "center", gap: 10 },
   itemProgressTrack: {
