@@ -3,20 +3,29 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect } from "expo-router";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
 import React, { useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, RefreshControl, SectionList, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  RefreshControl,
+  SectionList,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from "react-native";
 
 import { getMyBest, getUser } from "../../src/services/db";
 import { auth, db } from "../../src/services/firebase";
 
+// ✅ Toast
+import { useToast } from "../../src/components/ToastProvider";
+
 // --- KONFIGURATION: BELOHNUNGEN ---
-// Mapping von Achievement-ID-Teilen zu den angezeigten Belohnungen.
-// "Erste Schritte" ist hier NICHT dabei, also wird dort nichts angezeigt.
 const UNLOCK_REWARDS: Record<string, string> = {
-  "spaziergang": "Kopfbedeckung: Blaue Cap",
-  "enthusiast": "Outfit: Blaues Shirt & Streifen",
-  "unaufhaltsam": "Outfit: Schwarzer Tracksuit",
-  "sohlenzerstoerer": "Effekt: Brennende Sohlen",
-  "meister": "Accessoire: Goldkette (SQ)",
+  spaziergang: "Kopfbedeckung: Blaue Cap",
+  enthusiast: "Outfit: Blaues Shirt & Streifen",
+  unaufhaltsam: "Outfit: Schwarzer Tracksuit",
+  sohlenzerstoerer: "Effekt: Brennende Sohlen",
+  meister: "Accessoire: Goldkette (SQ)",
 };
 
 type Achievement = {
@@ -60,14 +69,13 @@ function getIconNameForAchievement(id: string): keyof typeof Ionicons.glyphMap {
  */
 function getRewardName(id: string): string | null {
   const lowerId = (id || "").toLowerCase();
-  
-  // Wir iterieren durch unsere Config und schauen, ob der Key in der ID vorkommt
-  const foundKey = Object.keys(UNLOCK_REWARDS).find(k => lowerId.includes(k));
-  
+  const foundKey = Object.keys(UNLOCK_REWARDS).find((k) => lowerId.includes(k));
   return foundKey ? UNLOCK_REWARDS[foundKey] : null;
 }
 
 export default function Erfolge() {
+  const { showToast } = useToast();
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -219,46 +227,73 @@ export default function Erfolge() {
         renderItem={({ item }) => {
           const needed = Math.max(1, Number(item.stepsRequired) || 0);
           const iconName = getIconNameForAchievement(item.id);
-          const rewardName = getRewardName(item.id); // Belohnung ermitteln
+          const rewardName = getRewardName(item.id);
+
+          // ✅ Toast-Text: Item-IDs anzeigen (schön)
+          const ids = (item.unlockItemIds ?? []).filter(Boolean);
+          const shown = ids.slice(0, 3);
+          const rest = ids.length - shown.length;
+
+          const itemsText =
+            ids.length === 0
+              ? "Keine Items"
+              : rest > 0
+                ? `${shown.join(" · ")}  +${rest}`
+                : shown.join(" · ");
+
+          const statusText = item.isUnlocked
+            ? "Freigeschaltet ✅"
+            : `Noch ${formatInt(item.remaining)} Schritte`;
+
+          const toastTitle = item.title?.trim() ? item.title.trim() : "Achievement";
 
           return (
-            <View style={styles.itemCard}>
-              <View style={styles.iconBox}>
-                <Ionicons name={iconName} size={18} color="white" />
-              </View>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={() => {
+                showToast({
+                  type: item.isUnlocked ? "success" : "info",
+                  title: toastTitle,
+                  message: `🎁 ${itemsText} — ${statusText}`,
+                });
+              }}
+            >
+              <View style={styles.itemCard}>
+                <View style={styles.iconBox}>
+                  <Ionicons name={iconName} size={18} color="white" />
+                </View>
 
-              <View style={styles.itemTextCol}>
-                <Text style={styles.itemTitle} numberOfLines={1}>
-                  {item.title}
-                </Text>
+                <View style={styles.itemTextCol}>
+                  <Text style={styles.itemTitle} numberOfLines={1}>
+                    {item.title}
+                  </Text>
 
-                <Text style={styles.itemSub} numberOfLines={1}>
-                  Erreiche {formatInt(needed)} Schritte an einem Tag
-                </Text>
+                  <Text style={styles.itemSub} numberOfLines={1}>
+                    Erreiche {formatInt(needed)} Schritte an einem Tag
+                  </Text>
 
-                {/* --- NEU: ANZEIGE DER BELOHNUNG --- */}
-                {/* Nur anzeigen, wenn eine Belohnung existiert */}
-                {rewardName && (
-                  <View style={styles.rewardBadge}>
-                    <Ionicons name="gift-outline" size={10} color="#3b82f6" style={{ marginRight: 4 }} />
-                    <Text style={styles.rewardText}>{rewardName}</Text>
-                  </View>
-                )}
-
-                {!item.isUnlocked ? (
-                  <View style={styles.itemProgressRow}>
-                    <View style={styles.itemProgressTrack}>
-                      <View style={[styles.itemProgressFill, { width: `${Math.round(item.pct * 100)}%` }]} />
+                  {rewardName && (
+                    <View style={styles.rewardBadge}>
+                      <Ionicons name="gift-outline" size={10} color="#3b82f6" style={{ marginRight: 4 }} />
+                      <Text style={styles.rewardText}>{rewardName}</Text>
                     </View>
-                    <Text style={styles.itemProgressText}>
-                      {formatInt(myBest)}/{formatInt(needed)}
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
+                  )}
 
-              <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
-            </View>
+                  {!item.isUnlocked ? (
+                    <View style={styles.itemProgressRow}>
+                      <View style={styles.itemProgressTrack}>
+                        <View style={[styles.itemProgressFill, { width: `${Math.round(item.pct * 100)}%` }]} />
+                      </View>
+                      <Text style={styles.itemProgressText}>
+                        {formatInt(myBest)}/{formatInt(needed)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+
+                <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+              </View>
+            </TouchableOpacity>
           );
         }}
         ItemSeparatorComponent={() => <View style={{ height: 10 }} />}
@@ -335,7 +370,6 @@ const styles = StyleSheet.create({
 
   itemCard: {
     marginHorizontal: 20,
-    // Variable Höhe für Reward-Badge zulassen
     minHeight: 82,
     paddingVertical: 14,
     paddingHorizontal: 16,
@@ -368,7 +402,6 @@ const styles = StyleSheet.create({
   itemTitle: { fontSize: 14, fontWeight: "900", color: "#0f172a" },
   itemSub: { marginTop: 2, fontSize: 12, color: "#64748b", fontWeight: "700" },
 
-  // --- STYLES FÜR DEN BELOHNUNGS-BADGE ---
   rewardBadge: {
     marginTop: 6,
     flexDirection: "row",

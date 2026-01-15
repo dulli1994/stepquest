@@ -23,10 +23,16 @@ import {
   getDailyGoal,
   getWeeklySteps,
   updateHighscoreIfBetter,
-  upsertDailySteps,
+  upsertDailyStepsAndDetectGoal,
 } from "../../src/services/db";
 import { auth } from "../../src/services/firebase";
 import { readTodayStepsFromHealthConnect } from "../../src/services/healthConnect";
+
+// ✅ Daily-Goal Feedback (Sound+Vibration)
+import { playDailyGoalReachedFeedback } from "../../src/services/feedback";
+
+// ✅ Toast
+import { useToast } from "../../src/components/ToastProvider";
 
 const STORAGE_DAY_KEY = "stepquest.today.dayKey";
 const STORAGE_STEPS_KEY = "stepquest.today.steps";
@@ -60,6 +66,8 @@ function clamp(n: number, min: number, max: number) {
 }
 
 export default function Home() {
+  const { showToast } = useToast(); // ✅ Toast Hook
+
   const [steps, setSteps] = useState(0);
   const [showBatteryHint, setShowBatteryHint] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -68,7 +76,7 @@ export default function Home() {
   const [weeklySteps, setWeeklySteps] = useState<number[]>([0, 0, 0, 0, 0, 0, 0]);
   const [weeklyHeights, setWeeklyHeights] = useState<number[]>([0, 0, 0, 0, 0, 0, 0]);
   const [weekLabels, setWeekLabels] = useState<string[]>(getLast7DaysLabels());
-  
+
   // ✅ Neu: Welcher Balken wurde angeklickt? (Index)
   const [selectedBarIndex, setSelectedBarIndex] = useState<number | null>(null);
 
@@ -145,7 +153,6 @@ export default function Home() {
     try {
       const data = await getWeeklySteps(uid);
 
-      // ✅ Speichern der echten Schrittzahlen für das Tooltip
       setWeeklySteps(data);
 
       const mappedHeights = data.map((s: number) => {
@@ -160,7 +167,11 @@ export default function Home() {
     }
   }
 
-  function setStepsAndPersist(nextSteps: number) {
+  /**
+   * Steps setzen + lokal persistieren, und Backend ggf. synchronisieren.
+   * Wichtig: Goal-Reached Feedback kommt NUR aus syncBackendIfNeeded (einmalig).
+   */
+  function setStepsAndPersist(nextSteps: number, opts?: { forceSync?: boolean }) {
     const prev = stepsRef.current;
     const g = goalRef.current;
 
@@ -172,15 +183,12 @@ export default function Home() {
       AsyncStorage.setItem(STORAGE_STEPS_KEY, String(nextSteps)),
     ]).catch(() => {});
 
-    // ✅ Sofortiger Goal-Reached Write (max 1x/Tag) — nur wenn Goal geladen ist
     const uid = auth.currentUser?.uid;
-    if (uid && goalReadyRef.current && prev < g && nextSteps >= g) {
-      upsertDailySteps(uid, nextSteps, g)
-        .then(() => loadStreak())
-        .catch(() => {});
-    }
+    const goalCrossed = Boolean(uid && goalReadyRef.current && prev < g && nextSteps >= g);
+    const force = Boolean(opts?.forceSync || goalCrossed);
 
-    syncBackendIfNeeded(nextSteps).catch(() => {});
+    // ✅ Nur noch hier: Backend Sync (und dort ggf. Feedback/Toast)
+    syncBackendIfNeeded(nextSteps, force).catch(() => {});
   }
 
   async function onRefresh() {
@@ -228,37 +236,68 @@ export default function Home() {
     lastSystemStepsRef.current = null;
     lastSystemChangedMsRef.current = 0;
 
-    setStepsAndPersist(0);
+    // ✅ Tageswechsel: Reset sofort auch ins Backend syncen
+    setStepsAndPersist(0, { forceSync: true });
 
     const g = await loadGoal();
     loadWeeklyData(g);
     loadStreak();
   }
 
-  async function syncBackendIfNeeded(currentSteps: number) {
+  async function syncBackendIfNeeded(currentSteps: number, force = false) {
     const uid = auth.currentUser?.uid;
     if (!uid) return;
 
     const nowMs = Date.now();
     const msSinceLast = nowMs - lastSyncAtMsRef.current;
     const stepDelta = currentSteps - lastSyncedStepsRef.current;
-    const shouldSync = msSinceLast >= SYNC_INTERVAL_MS || stepDelta >= SYNC_MIN_STEP_DELTA;
+
+    const shouldSync = force || msSinceLast >= SYNC_INTERVAL_MS || stepDelta >= SYNC_MIN_STEP_DELTA;
     if (!shouldSync) return;
 
     lastSyncAtMsRef.current = nowMs;
     lastSyncedStepsRef.current = currentSteps;
 
     try {
-      // ✅ dailySteps nur, wenn Goal geladen ist
+      // ✅ dailySteps + goalJustReached atomar (UND nur hier Feedback/Toast)
       if (goalReadyRef.current) {
-        await upsertDailySteps(uid, currentSteps, goalRef.current);
+        const res = await upsertDailyStepsAndDetectGoal(uid, currentSteps, goalRef.current);
+        if (res.goalJustReached) {
+          await playDailyGoalReachedFeedback();
+          showToast({
+            type: "success",
+            title: "Tagesziel erreicht! 🎉",
+            message: `Du hast ${goalRef.current.toLocaleString("de-DE")} Schritte geschafft.`,
+          });
+        }
       }
 
       await updateHighscoreIfBetter(uid, currentSteps);
 
       const ach = await unlockAchievementsIfNeeded(uid, currentSteps);
+
       if (ach.unlocked.length > 0) {
-        Alert.alert("Neuer Erfolg freigeschaltet", ach.unlocked.join(", "));
+        // bevorzugt Titel, fallback auf IDs
+        const names =
+          (ach as any).unlockedTitles &&
+          Array.isArray((ach as any).unlockedTitles) &&
+          (ach as any).unlockedTitles.length > 0
+            ? (ach as any).unlockedTitles
+            : ach.unlocked;
+
+        const shown = names.slice(0, 3);
+        const rest = names.length - shown.length;
+
+        showToast({
+          type: "success",
+          title: "Erfolg freigeschaltet! 🏆",
+          message:
+            names.length === 1
+              ? shown[0]
+              : rest > 0
+                ? `${shown.join(" · ")}  +${rest} weitere`
+                : shown.join(" · "),
+        });
       }
 
       loadWeeklyData(goalRef.current);
@@ -364,7 +403,6 @@ export default function Home() {
     poll().catch(() => {});
   }
 
-  // ✅ Beim Öffnen des Tabs (z.B. zurück vom Profil): Goal neu laden und UI neu berechnen
   useFocusEffect(
     useCallback(() => {
       (async () => {
@@ -479,7 +517,6 @@ export default function Home() {
 
       <Text style={styles.sectionTitle}>Wochenübersicht</Text>
       <View style={styles.weeklyCard}>
-        {/* ✅ Grid Lines für bessere Lesbarkeit (Tabelle-Effekt) */}
         <View style={StyleSheet.absoluteFill}>
           <View style={styles.gridLineTop} />
           <View style={styles.gridLineMiddle} />
@@ -489,21 +526,18 @@ export default function Home() {
         <View style={styles.chartContainer}>
           {weekLabels.map((day, i) => {
             const heightVal = Math.max(weeklyHeights[i] || 0, 5);
-            // Wenn ausgewählt, etwas heller machen oder Highlight-Farbe
             const isSelected = selectedBarIndex === i;
             const rawSteps = weeklySteps[i] || 0;
-            
-            // Logik für Farbe: Grün wenn Ziel (100% ~ Höhe 100) fast erreicht, sonst Lila
+
             const barColor = weeklyHeights[i] >= 95 ? "#10b981" : "#8b5cf6";
 
             return (
-              <TouchableOpacity 
-                key={i} 
+              <TouchableOpacity
+                key={i}
                 style={styles.barColumn}
                 activeOpacity={0.7}
                 onPress={() => setSelectedBarIndex(isSelected ? null : i)}
               >
-                {/* Tooltip, wenn ausgewählt */}
                 {isSelected && (
                   <View style={styles.tooltipContainer}>
                     <Text style={styles.tooltipText}>{rawSteps.toLocaleString("de-DE")}</Text>
@@ -512,15 +546,15 @@ export default function Home() {
                 )}
 
                 <View style={styles.barTrack}>
-                  <View 
+                  <View
                     style={[
-                      styles.barFill, 
-                      { 
-                        height: `${heightVal}%`, 
+                      styles.barFill,
+                      {
+                        height: `${heightVal}%`,
                         backgroundColor: barColor,
-                        opacity: isSelected ? 1 : 0.85 // Visuelles Feedback bei Selektion
-                      }
-                    ]} 
+                        opacity: isSelected ? 1 : 0.85,
+                      },
+                    ]}
                   />
                 </View>
                 <Text style={[styles.dayLabel, isSelected && styles.dayLabelSelected]}>{day}</Text>
@@ -583,16 +617,15 @@ const styles = StyleSheet.create({
     marginHorizontal: 20,
     backgroundColor: "white",
     padding: 20,
-    paddingTop: 30, // Mehr Platz oben für Tooltips
+    paddingTop: 30,
     borderRadius: 24,
     borderWidth: 1,
     borderColor: "#f1f5f9",
     position: "relative",
   },
-  // Grid Lines Styles für den "Tabellen-Look"
   gridLineTop: {
     position: "absolute",
-    top: 30, // Entspricht ungefähr 100% Höhe im Chart
+    top: 30,
     left: 20,
     right: 20,
     height: 1,
@@ -601,7 +634,7 @@ const styles = StyleSheet.create({
   },
   gridLineMiddle: {
     position: "absolute",
-    top: 105, // Ungefähr die Mitte
+    top: 105,
     left: 20,
     right: 20,
     height: 1,
@@ -609,7 +642,7 @@ const styles = StyleSheet.create({
   },
   gridLineBottom: {
     position: "absolute",
-    bottom: 40, // Basislinie
+    bottom: 40,
     left: 20,
     right: 20,
     height: 1,
@@ -618,18 +651,11 @@ const styles = StyleSheet.create({
 
   chartContainer: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", height: 150 },
   barColumn: { alignItems: "center", flex: 1, zIndex: 10 },
-  barTrack: {
-    width: 10, // Etwas breiter für Touch
-    height: "100%",
-    backgroundColor: "transparent", // Track unsichtbar, damit Grid wirkt
-    justifyContent: "flex-end",
-    // overflow: "hidden", // Entfernt, damit Tooltip nicht abgeschnitten wird falls er darin wäre
-  },
+  barTrack: { width: 10, height: "100%", backgroundColor: "transparent", justifyContent: "flex-end" },
   barFill: { width: "100%", borderRadius: 4 },
   dayLabel: { marginTop: 8, fontSize: 12, color: "#94a3b8", fontWeight: "600" },
   dayLabelSelected: { color: "#5b72ff", fontWeight: "800" },
 
-  // Tooltip Styles
   tooltipContainer: {
     position: "absolute",
     top: -28,
@@ -654,5 +680,5 @@ const styles = StyleSheet.create({
     borderRightColor: "transparent",
     borderTopColor: "#1e293b",
     marginTop: -1,
-  }
+  },
 });

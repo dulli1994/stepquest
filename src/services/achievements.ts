@@ -1,4 +1,14 @@
-import { collection, doc, getDoc, getDocs, query, where, updateDoc, arrayUnion } from "firebase/firestore";
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  updateDoc,
+  arrayUnion,
+  orderBy,
+} from "firebase/firestore";
 import { db } from "./firebase";
 
 type AchievementDef = {
@@ -9,13 +19,28 @@ type AchievementDef = {
 };
 
 export async function getEligibleAchievements(steps: number) {
-  const q = query(collection(db, "achievements"), where("stepsRequired", "<=", steps));
+  const q = query(
+    collection(db, "achievements"),
+    where("stepsRequired", "<=", steps),
+    orderBy("stepsRequired", "asc")
+  );
+
   const snap = await getDocs(q);
 
-  return snap.docs.map((d) => ({
+  const list = snap.docs.map((d) => ({
     id: d.id,
     ...(d.data() as AchievementDef),
   }));
+
+  // optional: falls "order" verwendet wird
+  list.sort((a, b) => {
+    const ao = typeof a.order === "number" ? a.order : Number.MAX_SAFE_INTEGER;
+    const bo = typeof b.order === "number" ? b.order : Number.MAX_SAFE_INTEGER;
+    if (ao !== bo) return ao - bo;
+    return (a.stepsRequired ?? 0) - (b.stepsRequired ?? 0);
+  });
+
+  return list;
 }
 
 export async function unlockAchievementsIfNeeded(uid: string, steps: number) {

@@ -212,6 +212,7 @@ export async function setDailyGoal(uid: string, goal: number) {
 
 /**
  * Upsert: Tageswert in Unter-Collection speichern
+ * (bestehender Export bleibt für Backwards-Compatibility)
  */
 export async function upsertDailySteps(uid: string, steps: number, goal: number) {
   const dayKey = getDayKey(new Date());
@@ -228,6 +229,46 @@ export async function upsertDailySteps(uid: string, steps: number, goal: number)
     },
     { merge: true }
   );
+}
+
+/**
+ * ✅ NEU: Upsert + erkennt "goalJustReached" atomar (Race-Condition-safe)
+ *
+ * Warum?
+ * - Wenn Steps schnell mehrmals rein kommen (UI + Background), willst du Sound/Haptik nur 1x
+ * - Wir lesen den alten goalReached und schreiben den neuen Zustand in EINER Transaction.
+ *
+ * Rückgabe:
+ * - goalReached: aktueller Zustand
+ * - goalJustReached: true nur beim Wechsel von false -> true
+ */
+export async function upsertDailyStepsAndDetectGoal(uid: string, steps: number, goal: number) {
+  const dayKey = getDayKey(new Date());
+  const ref = doc(db, "users", uid, "dailySteps", dayKey);
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+
+    const prevReached = snap.exists() ? !!(snap.data() as any)?.goalReached : false;
+    const nextReached = steps >= goal;
+
+    tx.set(
+      ref,
+      {
+        steps,
+        date: dayKey,
+        goal,
+        goalReached: nextReached,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return {
+      goalReached: nextReached,
+      goalJustReached: !prevReached && nextReached,
+    };
+  });
 }
 
 /**
