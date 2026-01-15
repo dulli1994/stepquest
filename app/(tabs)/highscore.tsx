@@ -1,5 +1,6 @@
 import { collection, doc, getCountFromServer, getDoc } from "firebase/firestore";
-import React, { useEffect, useMemo, useState } from "react";
+import { useFocusEffect } from "expo-router";
+import React, { useCallback, useState } from "react";
 import { ActivityIndicator, FlatList, StyleSheet, Text, View } from "react-native";
 import { getLeaderboard } from "../../src/services/db";
 import { auth, db } from "../../src/services/firebase";
@@ -20,8 +21,6 @@ export default function Highscore() {
 
   // Eigene Daten extra speichern für die Leiste unten
   const [myData, setMyData] = useState<Row | null>(null);
-
-  const myUid = auth.currentUser?.uid ?? null;
 
   async function enrichWithUsernames(baseRows: Row[]): Promise<Row[]> {
     // UIDs unique
@@ -54,6 +53,8 @@ export default function Highscore() {
     try {
       setLoading(true);
 
+      const myUidNow = auth.currentUser?.uid ?? null;
+
       // 1. Leaderboard laden (Top 50 für die Liste)
       const topDataRaw = await getLeaderboard(50);
       const topData = await enrichWithUsernames(topDataRaw);
@@ -65,7 +66,7 @@ export default function Highscore() {
       setTotalUsers(snapshot.data().count);
 
       // 3. Meinen Rang in der Top-Liste suchen
-      const myIndex = topData.findIndex((r) => r.uid === myUid);
+      const myIndex = topData.findIndex((r) => r.uid === myUidNow);
       if (myIndex !== -1) {
         setMyRank(myIndex + 1);
         setMyData(topData[myIndex]); // Daten direkt aus der Liste nehmen
@@ -73,15 +74,15 @@ export default function Highscore() {
         setMyRank(null);
 
         // Wenn ich NICHT in der Top Liste bin, muss ich meine Daten einzeln laden
-        if (myUid) {
-          const myDocRef = doc(db, "scores", myUid);
+        if (myUidNow) {
+          const myDocRef = doc(db, "scores", myUidNow);
           const mySnap = await getDoc(myDocRef);
 
           if (mySnap.exists()) {
-            const baseMy: Row = { uid: myUid, ...(mySnap.data() as any) };
+            const baseMy: Row = { uid: myUidNow, ...(mySnap.data() as any) };
 
             // Username extra holen
-            const uref = doc(db, "users", myUid);
+            const uref = doc(db, "users", myUidNow);
             const usnap = await getDoc(uref);
             const uname = (usnap.data() as any)?.username;
 
@@ -89,7 +90,11 @@ export default function Highscore() {
               ...baseMy,
               username: typeof uname === "string" ? uname : undefined,
             });
+          } else {
+            setMyData(null);
           }
+        } else {
+          setMyData(null);
         }
       }
     } catch (e) {
@@ -99,10 +104,14 @@ export default function Highscore() {
     }
   }
 
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // ✅ Statt useEffect: Lädt jedes Mal neu, wenn du den Highscore-Tab betrittst
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [])
+  );
+
+  const myUid = auth.currentUser?.uid ?? null;
 
   // --- HELPER ---
   const formatName = (row: Row, isMe: boolean) => {
@@ -112,7 +121,7 @@ export default function Highscore() {
   };
 
   const getInitials = (row: Row) => {
-    const source = (row.username && row.username.trim()) ? row.username.trim() : row.uid;
+    const source = row.username && row.username.trim() ? row.username.trim() : row.uid;
     const cleaned = source.replace(/\s+/g, " ").trim();
     const parts = cleaned.split(" ");
 
@@ -202,7 +211,9 @@ export default function Highscore() {
             <View style={styles.listHeaderRow}>
               <Text style={styles.listTitle}>Top 50</Text>
               <View style={styles.myRankContainer}>
-                <Text style={styles.myRankText}>(Du: {myRank ? `#${myRank}` : "-"} / {totalUsers})</Text>
+                <Text style={styles.myRankText}>
+                  (Du: {myRank ? `#${myRank}` : "-"} / {totalUsers})
+                </Text>
               </View>
             </View>
           </View>
@@ -329,7 +340,12 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   listTitle: { fontSize: 18, fontWeight: "700", color: "#333" },
-  myRankContainer: { backgroundColor: "#E0E0E0", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  myRankContainer: {
+    backgroundColor: "#E0E0E0",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
   myRankText: { fontSize: 12, fontWeight: "600", color: "#555" },
 
   cardItem: {

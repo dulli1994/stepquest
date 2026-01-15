@@ -66,14 +66,15 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "c4679a33-43fa-427c-9a49-cac9ebf439a7"
+        "projectId": "a9aada37-20a6-4fed-8db6-c94e6ac96e6b"
       }
     },
-    "runtimeVersion": {
-      "policy": "appVersion"
-    },
-    "updates": {
-      "url": "https://u.expo.dev/c4679a33-43fa-427c-9a49-cac9ebf439a7"
-    }
+    "owner": "dauli94"
+  },
+  "runtimeVersion": {
+    "policy": "appVersion"
+  },
+  "updates": {
+    "url": "https://u.expo.dev/c4679a33-43fa-427c-9a49-cac9ebf439a7"
   }
 }

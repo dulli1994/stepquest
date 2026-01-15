@@ -8,7 +8,6 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  updateDoc,
   runTransaction,
 } from "firebase/firestore";
 import { db } from "./firebase";
@@ -32,6 +31,7 @@ export type UserDoc = {
 export type ScoreDoc = {
   bestDailySteps: number;
   updatedAt: any;
+  createdAt?: any;
 };
 
 export const DEFAULT_DAILY_GOAL = 8000;
@@ -48,34 +48,40 @@ export function getDayKey(d: Date) {
 }
 
 /**
- * ✅ Wichtig: niemals "hart überschreiben", sonst gehen username-Felder verloren.
- * Daher immer merge:true.
+ * ✅ Fix (Step 1): ensure darf NICHT jedes Mal Defaults drüberbügeln.
+ * Lösung: create-only via Transaction.
  */
 export async function ensureUserDoc(uid: string) {
   const ref = doc(db, "users", uid);
 
-  const data: UserDoc = {
-    dailyGoal: DEFAULT_DAILY_GOAL,
-    createdAt: serverTimestamp(),
-    unlockedAchievementIds: [],
-    unlockedItemIds: [],
-    avatar: { skinTone: "default", equippedItemIds: [] },
-  };
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists()) return;
 
-  // ✅ merge verhindert clobber
-  await setDoc(ref, data, { merge: true });
+    tx.set(ref, {
+      dailyGoal: DEFAULT_DAILY_GOAL,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      unlockedAchievementIds: [],
+      unlockedItemIds: [],
+      avatar: { skinTone: "default", equippedItemIds: [] },
+    });
+  });
 }
 
 export async function ensureScoreDoc(uid: string) {
   const ref = doc(db, "scores", uid);
 
-  const data: ScoreDoc = {
-    bestDailySteps: 0,
-    updatedAt: serverTimestamp(),
-  };
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists()) return;
 
-  // ✅ safe
-  await setDoc(ref, data, { merge: true });
+    tx.set(ref, {
+      bestDailySteps: 0,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  });
 }
 
 export async function ensureUserAndScore(uid: string) {
@@ -93,14 +99,6 @@ function normalizeUsername(raw: string) {
 
 /**
  * ✅ Username eindeutig reservieren + in users/{uid} speichern
- *
- * Registry: usernames/{usernameLower}
- *  - verhindert Duplikate (case-insensitive)
- *  - Transaction schützt vor Race-Conditions
- *
- * Speichert außerdem in users/{uid}:
- *  - username
- *  - usernameLower
  */
 export async function setUsername(uid: string, username: string) {
   const { display, lower } = normalizeUsername(username);
@@ -121,6 +119,7 @@ export async function setUsername(uid: string, username: string) {
         {
           dailyGoal: DEFAULT_DAILY_GOAL,
           createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
           unlockedAchievementIds: [],
           unlockedItemIds: [],
           avatar: { skinTone: "default", equippedItemIds: [] },
@@ -177,7 +176,6 @@ export async function getDailyGoal(uid: string): Promise<number> {
 
 /**
  * Hilfsfunktion: aktualisiert today's dailySteps.goal + goalReached anhand gespeicherter steps.
- * (damit nach Goal-Änderung die Streak für "heute" sofort korrekt ist)
  */
 async function syncTodayGoalFromStoredSteps(uid: string, goal: number) {
   const dayKey = getDayKey(new Date());
@@ -202,25 +200,18 @@ async function syncTodayGoalFromStoredSteps(uid: string, goal: number) {
 
 /**
  * Daily Goal setzen (UserDoc) + heute sofort "goalReached" neu berechnen.
- * Robust: erstellt users/{uid} notfalls (kein updateDoc-Crash)
  */
 export async function setDailyGoal(uid: string, goal: number) {
   await ensureUserDoc(uid);
 
   const ref = doc(db, "users", uid);
-
-  // merge = safe, falls Dokument minimal/anders ist
   await setDoc(ref, { dailyGoal: goal }, { merge: true });
 
   await syncTodayGoalFromStoredSteps(uid, goal);
 }
 
 /**
- * Upsert: Tageswert in Unter-Collection speichern (Basis: Weekly + Streak)
- * Pfad: users/{uid}/dailySteps/{YYYY-MM-DD}
- *
- * Wichtig: wir speichern goal + goalReached pro Tag -> Streak bleibt korrekt,
- * auch wenn das Ziel später geändert wird.
+ * Upsert: Tageswert in Unter-Collection speichern
  */
 export async function upsertDailySteps(uid: string, steps: number, goal: number) {
   const dayKey = getDayKey(new Date());
@@ -240,26 +231,39 @@ export async function upsertDailySteps(uid: string, steps: number, goal: number)
 }
 
 /**
- * Updatet Highscore (Highscore ist unabhängig vom Tagesziel.)
+ * ✅ Step 2 (Fix): Highscore atomar updaten (Race-Condition-safe)
+ * - keine getDoc + updateDoc Kombination
+ * - nutzt Transaction und schreibt nur, wenn steps > best
  */
 export async function updateHighscoreIfBetter(uid: string, steps: number) {
   const ref = doc(db, "scores", uid);
-  const snap = await getDoc(ref);
 
-  if (!snap.exists()) {
-    await setDoc(ref, { bestDailySteps: steps, updatedAt: serverTimestamp() }, { merge: true });
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+
+    const best = snap.exists() ? ((snap.data() as any)?.bestDailySteps ?? 0) : 0;
+
+    // nichts zu tun
+    if (steps <= best) {
+      return { updated: false, bestDailySteps: best };
+    }
+
+    // neues best
+    if (!snap.exists()) {
+      tx.set(ref, {
+        bestDailySteps: steps,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      tx.update(ref, {
+        bestDailySteps: steps,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
     return { updated: true, bestDailySteps: steps };
-  }
-
-  const current = snap.data() as { bestDailySteps?: number };
-  const best = current.bestDailySteps ?? 0;
-
-  if (steps > best) {
-    await updateDoc(ref, { bestDailySteps: steps, updatedAt: serverTimestamp() });
-    return { updated: true, bestDailySteps: steps };
-  }
-
-  return { updated: false, bestDailySteps: best };
+  });
 }
 
 /**
@@ -297,9 +301,6 @@ export async function getWeeklySteps(uid: string): Promise<number[]> {
 
 /**
  * Streak: zählt rückwärts ab heute, wie viele Tage in Folge goalReached=true sind.
- * (goalReached wird pro Tag gespeichert -> historisch korrekt)
- *
- * 2. Parameter optional nur für Backwards-Compatibility (falls Home noch getCurrentStreak(uid, goal) nutzt).
  */
 export async function getCurrentStreak(uid: string, _unusedGoal?: number): Promise<number> {
   try {
